@@ -2,11 +2,24 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use uuid::Uuid;
+
+use crate::ddc::{InputSource, StableId};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Config {
     pub machine_name: String,
+    #[serde(default)]
     pub input_labels: HashMap<String, String>,
+    /// Generated once on first run and persisted; identifies this machine on the LAN.
+    #[serde(default = "Uuid::new_v4")]
+    pub machine_id: Uuid,
+    /// Manual peer address fallback when broadcast discovery is filtered, e.g. "192.168.1.50".
+    #[serde(default)]
+    pub peer_host: Option<String>,
+    /// The input this machine occupies on each monitor, learned while active and persisted.
+    #[serde(default)]
+    pub my_inputs: HashMap<StableId, InputSource>,
 }
 
 impl Default for Config {
@@ -14,6 +27,9 @@ impl Default for Config {
         Self {
             machine_name: hostname(),
             input_labels: HashMap::new(),
+            machine_id: Uuid::new_v4(),
+            peer_host: None,
+            my_inputs: HashMap::new(),
         }
     }
 }

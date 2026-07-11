@@ -3,9 +3,7 @@ use crate::ddc::{InputSource, StableId};
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Owner {
     Me,
-    #[allow(dead_code)]
     Peer,
-    #[allow(dead_code)]
     Unknown,
 }
 
@@ -24,4 +22,6 @@ pub struct MonitorState {
 pub struct AppState {
     pub monitors: Vec<MonitorState>,
     pub status: String,
+    pub peer_online: bool,
+    pub peer_name: Option<String>,
 }

@@ -2,6 +2,7 @@ mod config;
 mod ddc;
 mod logging;
 mod model;
+mod net;
 mod ui;
 mod worker;
 
@@ -63,22 +64,26 @@ fn main() -> Result<()> {
 fn run_gui() -> Result<()> {
     let cfg = config::Config::load().unwrap_or_else(|e| {
         log::warn!("failed to load config, using defaults: {e:#}");
-        let cfg = config::Config::default();
-        if let Err(e) = cfg.save() {
-            log::warn!("failed to write default config: {e:#}");
-        }
-        cfg
+        config::Config::default()
     });
+    // Persist so a freshly generated machine_id (and any new defaults) sticks.
+    if let Err(e) = cfg.save() {
+        log::warn!("failed to write config: {e:#}");
+    }
 
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
     let (evt_tx, evt_rx) = std::sync::mpsc::channel();
+    let (net_evt_tx, net_evt_rx) = std::sync::mpsc::channel();
 
     eframe::run_native(
         "MPlexer",
         eframe::NativeOptions::default(),
         Box::new(move |cc| {
             worker::spawn(cmd_rx, evt_tx, cc.egui_ctx.clone());
-            Ok(Box::new(ui::MplexerApp::new(cfg, cmd_tx, evt_rx)))
+            let net = net::spawn(cfg.clone(), net_evt_tx, cc.egui_ctx.clone());
+            Ok(Box::new(ui::MplexerApp::new(
+                cfg, cmd_tx, evt_rx, net, net_evt_rx,
+            )))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe error: {e}"))

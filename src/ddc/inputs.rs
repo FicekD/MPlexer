@@ -1,5 +1,4 @@
-/// A VCP 0x60 input-source value with a human label.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
 pub struct InputSource(pub u8);
 
 impl InputSource {
