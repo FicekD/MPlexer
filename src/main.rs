@@ -1,3 +1,169 @@
-fn main() {
-    println!("Hello, world!");
+mod config;
+mod ddc;
+mod logging;
+mod model;
+mod ui;
+mod worker;
+
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand};
+use ddc::{InputSource, Monitor};
+
+#[derive(Parser)]
+#[command(name = "mplexer")]
+struct Cli {
+    /// Run the debugging harness instead of the GUI.
+    #[arg(long)]
+    cli: bool,
+
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+}
+
+#[derive(Subcommand)]
+enum CliCommand {
+    /// Enumerate monitors and print their id, name, current input and valid inputs.
+    List,
+    /// Read and print the current input for one monitor.
+    Get {
+        /// Full StableId string, or `#index` from `list`.
+        id: String,
+    },
+    /// Write the input source for one monitor. Requires --yes to actually write.
+    Set {
+        /// Full StableId string, or `#index` from `list`.
+        id: String,
+        /// VCP 0x60 input code, e.g. 0x11 or 11.
+        hex_code: String,
+        /// Actually perform the write. Without this, only prints what would happen.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+fn main() -> Result<()> {
+    logging::init();
+    let cli = Cli::parse();
+
+    if !cli.cli {
+        return run_gui();
+    }
+
+    let Some(command) = cli.command else {
+        anyhow::bail!("provide a subcommand: list | get | set");
+    };
+
+    match command {
+        CliCommand::List => list(),
+        CliCommand::Get { id } => get(&id),
+        CliCommand::Set { id, hex_code, yes } => set(&id, &hex_code, yes),
+    }
+}
+
+fn run_gui() -> Result<()> {
+    let cfg = config::Config::load().unwrap_or_else(|e| {
+        log::warn!("failed to load config, using defaults: {e:#}");
+        let cfg = config::Config::default();
+        if let Err(e) = cfg.save() {
+            log::warn!("failed to write default config: {e:#}");
+        }
+        cfg
+    });
+
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
+    let (evt_tx, evt_rx) = std::sync::mpsc::channel();
+
+    eframe::run_native(
+        "MPlexer",
+        eframe::NativeOptions::default(),
+        Box::new(move |cc| {
+            worker::spawn(cmd_rx, evt_tx, cc.egui_ctx.clone());
+            Ok(Box::new(ui::MplexerApp::new(cfg, cmd_tx, evt_rx)))
+        }),
+    )
+    .map_err(|e| anyhow::anyhow!("eframe error: {e}"))
+}
+
+fn list() -> Result<()> {
+    for (index, monitor) in ddc::enumerate().iter().enumerate() {
+        println!(
+            "#{}  id={}  name=\"{}\"  current={}  valid=[{}]",
+            index,
+            monitor.id.as_str(),
+            monitor.name,
+            format_input(monitor.current_input),
+            monitor
+                .valid_inputs
+                .iter()
+                .map(|i| i.label())
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+    }
+    Ok(())
+}
+
+fn get(id: &str) -> Result<()> {
+    let mut monitors = ddc::enumerate();
+    let monitor = resolve_monitor(&mut monitors, id)
+        .with_context(|| format!("no monitor matching '{id}'"))?;
+    let input = monitor.read_input()?;
+    println!(
+        "id={}  name=\"{}\"  current={}",
+        monitor.id.as_str(),
+        monitor.name,
+        format_input(Some(input)),
+    );
+    Ok(())
+}
+
+fn set(id: &str, hex_code: &str, yes: bool) -> Result<()> {
+    let code = parse_hex_code(hex_code)?;
+    let input = InputSource(code);
+
+    let mut monitors = ddc::enumerate();
+    let monitor = resolve_monitor(&mut monitors, id)
+        .with_context(|| format!("no monitor matching '{id}'"))?;
+
+    if !yes {
+        println!(
+            "WOULD write VCP 0x60 = 0x{:02X} ({}) on \"{}\" (id={}). This can blank the screen; re-run with --yes to actually switch.",
+            input.0,
+            input.label(),
+            monitor.name,
+            monitor.id.as_str(),
+        );
+        return Ok(());
+    }
+
+    println!(
+        "WARNING: switching \"{}\" (id={}) to {} (0x{:02X}) now.",
+        monitor.name,
+        monitor.id.as_str(),
+        input.label(),
+        input.0,
+    );
+    monitor.write_input(input)?;
+    println!("Done.");
+    Ok(())
+}
+
+fn resolve_monitor<'a>(monitors: &'a mut [Monitor], id: &str) -> Option<&'a mut Monitor> {
+    if let Some(index) = id.strip_prefix('#') {
+        let index: usize = index.parse().ok()?;
+        return monitors.get_mut(index);
+    }
+    monitors.iter_mut().find(|m| m.id.as_str() == id)
+}
+
+fn parse_hex_code(s: &str) -> Result<u8> {
+    let trimmed = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    u8::from_str_radix(trimmed, 16).with_context(|| format!("invalid hex code '{s}'"))
+}
+
+fn format_input(input: Option<InputSource>) -> String {
+    match input {
+        Some(i) => format!("{}(0x{:02X})", i.label(), i.0),
+        None => "unknown".to_string(),
+    }
 }
