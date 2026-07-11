@@ -82,6 +82,17 @@ pub fn enumerate() -> Vec<Monitor> {
 
     drop_backend_duplicates(&mut candidates);
 
+    // Drop phantom handles the Windows backend sometimes returns: no EDID, no
+    // model, and no DDC response at all. They can't be identified or controlled.
+    candidates.retain(|c| {
+        let communicating = c.current_input.is_some() || !c.valid_inputs.is_empty();
+        let keep = !is_ghost(c.has_edid, c.model_key.is_some(), communicating);
+        if !keep {
+            log::debug!("dropping anonymous non-responsive display handle");
+        }
+        keep
+    });
+
     candidates
         .into_iter()
         .enumerate()
@@ -118,6 +129,12 @@ fn drop_backend_duplicates(candidates: &mut Vec<Candidate>) {
         .collect();
     let mut is_duplicate = duplicate_flags(&entries).into_iter();
     candidates.retain(|_| !is_duplicate.next().unwrap());
+}
+
+/// A handle with no EDID, no model name, and no DDC response is a backend
+/// phantom rather than a real display.
+fn is_ghost(has_edid: bool, has_model: bool, communicating: bool) -> bool {
+    !has_edid && !has_model && !communicating
 }
 
 fn duplicate_flags(entries: &[(bool, Option<&str>)]) -> Vec<bool> {
@@ -180,5 +197,17 @@ mod tests {
     fn entry_without_model_name_is_never_treated_as_duplicate() {
         let entries = [(true, Some("msi md272qxp")), (false, None)];
         assert_eq!(duplicate_flags(&entries), vec![false, false]);
+    }
+
+    #[test]
+    fn anonymous_nonresponsive_handle_is_a_ghost() {
+        assert!(is_ghost(false, false, false));
+    }
+
+    #[test]
+    fn edid_model_or_ddc_response_keeps_a_handle() {
+        assert!(!is_ghost(true, false, false), "has EDID");
+        assert!(!is_ghost(false, true, false), "has model name");
+        assert!(!is_ghost(false, false, true), "responds over DDC");
     }
 }

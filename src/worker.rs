@@ -35,8 +35,7 @@ pub fn spawn(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::
 fn run(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::Context) {
     let mut monitors = ddc::enumerate();
 
-    let mut available: Vec<bool> = monitors.iter().map(|m| m.current_input.is_some()).collect();
-    let mut last = snapshot(&monitors, &available);
+    let mut last = snapshot(&monitors);
     if emit(&evt_tx, &ctx, WorkerEvt::Monitors(last.clone())).is_err() {
         return;
     }
@@ -45,8 +44,7 @@ fn run(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::Contex
         match cmd_rx.recv_timeout(POLL_INTERVAL) {
             Ok(WorkerCmd::Refresh) => {
                 monitors = ddc::enumerate();
-                available = monitors.iter().map(|m| m.current_input.is_some()).collect();
-                last = snapshot(&monitors, &available);
+                last = snapshot(&monitors);
                 if emit(&evt_tx, &ctx, WorkerEvt::Monitors(last.clone())).is_err() {
                     return;
                 }
@@ -62,21 +60,22 @@ fn run(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::Contex
                         }
                         Err(e) => Err(e.to_string()),
                     };
-                    available[idx] = result.is_ok();
                 }
                 if emit(&evt_tx, &ctx, WorkerEvt::SetResult { id, result }).is_err() {
                     return;
                 }
-                last = snapshot(&monitors, &available);
+                last = snapshot(&monitors);
                 if emit(&evt_tx, &ctx, WorkerEvt::Monitors(last.clone())).is_err() {
                     return;
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                for (m, avail) in monitors.iter_mut().zip(available.iter_mut()) {
-                    *avail = m.read_input().is_ok();
+                // Refresh each monitor's current input; a failed read (e.g. a TV that
+                // doesn't report input over DDC) just leaves the last known value.
+                for m in monitors.iter_mut() {
+                    let _ = m.read_input();
                 }
-                let current = snapshot(&monitors, &available);
+                let current = snapshot(&monitors);
                 if current != last {
                     last = current.clone();
                     if emit(&evt_tx, &ctx, WorkerEvt::Monitors(current)).is_err() {
@@ -89,16 +88,18 @@ fn run(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::Contex
     }
 }
 
-fn snapshot(monitors: &[Monitor], available: &[bool]) -> Vec<MonitorSnapshot> {
+/// Every enumerated handle is a display physically attached to this machine, so
+/// `available` reports presence, not input-readability. A monitor that drops out
+/// of a later `enumerate()` is marked unavailable by the UI's merge step.
+fn snapshot(monitors: &[Monitor]) -> Vec<MonitorSnapshot> {
     monitors
         .iter()
-        .zip(available.iter())
-        .map(|(m, &available)| MonitorSnapshot {
+        .map(|m| MonitorSnapshot {
             id: m.id.clone(),
             name: m.name.clone(),
             current_input: m.current_input,
             valid_inputs: m.valid_inputs.clone(),
-            available,
+            available: true,
         })
         .collect()
 }

@@ -14,9 +14,9 @@ pub struct Config {
     /// Generated once on first run and persisted; identifies this machine on the LAN.
     #[serde(default = "Uuid::new_v4")]
     pub machine_id: Uuid,
-    /// Manual peer address fallback when broadcast discovery is filtered, e.g. "192.168.1.50".
-    #[serde(default)]
-    pub peer_host: Option<String>,
+    /// TCP port this machine listens on and advertises for peer comms. Applied at startup.
+    #[serde(default = "default_comms_port")]
+    pub comms_port: u16,
     /// The input this machine occupies on each monitor, learned while active and persisted.
     #[serde(default)]
     pub my_inputs: HashMap<StableId, InputSource>,
@@ -28,10 +28,14 @@ impl Default for Config {
             machine_name: hostname(),
             input_labels: HashMap::new(),
             machine_id: Uuid::new_v4(),
-            peer_host: None,
+            comms_port: default_comms_port(),
             my_inputs: HashMap::new(),
         }
     }
+}
+
+fn default_comms_port() -> u16 {
+    crate::net::TCP_PORT
 }
 
 impl Config {

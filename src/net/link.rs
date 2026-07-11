@@ -24,14 +24,15 @@ pub type LocalView = Arc<Mutex<Vec<MonitorInfo>>>;
 pub fn spawn_accept(
     my_id: Uuid,
     my_name: String,
+    port: u16,
     local: LocalView,
     inbound: Sender<NetInbound>,
 ) {
     thread::spawn(move || {
-        let listener = match TcpListener::bind(("0.0.0.0", TCP_PORT)) {
+        let listener = match TcpListener::bind(("0.0.0.0", port)) {
             Ok(l) => l,
             Err(e) => {
-                log::error!("cannot bind TCP {TCP_PORT}: {e:#}");
+                log::error!("cannot bind TCP {port}: {e:#}");
                 return;
             }
         };

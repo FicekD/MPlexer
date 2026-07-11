@@ -16,6 +16,7 @@ pub struct Candidate {
     pub ip: IpAddr,
     pub tcp_port: u16,
     pub machine_id: Uuid,
+    pub machine_name: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -26,7 +27,7 @@ struct Announce {
 }
 
 /// Bind the discovery socket and run the announce + listen loops on their own threads.
-/// On bind failure discovery is skipped; the net task can still connect via `peer_host`.
+/// On bind failure discovery is skipped and no LAN hosts will appear for selection.
 pub fn spawn(machine_id: Uuid, machine_name: String, tcp_port: u16, inbound: Sender<NetInbound>) {
     let socket = match UdpSocket::bind(("0.0.0.0", UDP_PORT)) {
         Ok(s) => s,
@@ -93,6 +94,7 @@ fn listen(socket: &UdpSocket, my_id: Uuid, inbound: &Sender<NetInbound>) {
             ip: addr.ip(),
             tcp_port: announce.tcp_port,
             machine_id: announce.machine_id,
+            machine_name: announce.machine_name,
         };
         if inbound.send(NetInbound::Candidate(candidate)).is_err() {
             return;

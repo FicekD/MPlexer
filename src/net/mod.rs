@@ -2,8 +2,8 @@ mod discovery;
 mod link;
 pub mod proto;
 
-use std::collections::HashMap;
-use std::net::{TcpStream, ToSocketAddrs};
+use std::collections::{HashMap, HashSet};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,11 +15,15 @@ use crate::ddc::{InputSource, StableId};
 use crate::model::Owner;
 use crate::worker::MonitorSnapshot;
 use link::LocalView;
+pub use link::TCP_PORT;
 use proto::{Message, MonitorInfo};
 
 const TICK: Duration = Duration::from_secs(1);
 const DIAL_COOLDOWN: Duration = Duration::from_secs(4);
 const SWITCH_TIMEOUT: Duration = Duration::from_secs(8);
+/// A host that stops announcing shows Offline until it is finally dropped.
+const HOST_OFFLINE_AFTER: Duration = Duration::from_secs(7);
+const HOST_DROP_AFTER: Duration = Duration::from_secs(30);
 
 /// Commands from the UI into the net task.
 pub enum NetCmd {
@@ -32,6 +36,29 @@ pub enum NetCmd {
     },
     /// User asked to switch a monitor the peer owns.
     RequestSwitch { id: StableId, target: InputSource },
+    /// User picked a host to link with (or `None` to disconnect).
+    SelectPeer(Option<Uuid>),
+}
+
+/// A machine seen on the LAN (or the manually-dialed peer), for the hosts panel.
+#[derive(Clone, PartialEq)]
+pub struct HostView {
+    pub name: String,
+    pub addr: String,
+    pub machine_id: Uuid,
+    pub status: HostStatus,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum HostStatus {
+    /// The active peer link.
+    Connected,
+    /// Selected by the user; a link is being established.
+    Connecting,
+    /// Announcing on the LAN right now.
+    Online,
+    /// Seen recently but has since gone quiet.
+    Offline,
 }
 
 /// Events from the net task out to the UI.
@@ -40,6 +67,8 @@ pub enum NetEvt {
         name: String,
     },
     PeerOffline,
+    /// LAN hosts discovered (plus the connected peer), sorted for display.
+    Hosts(Vec<HostView>),
     /// Authoritative owner per local monitor id.
     Owners(HashMap<StableId, Owner>),
     /// The peer asked us (the owner) to switch a monitor; run it on the worker.
@@ -103,6 +132,12 @@ struct PeerConn {
     out_tx: Sender<Message>,
 }
 
+struct HostRecord {
+    name: String,
+    sock: Option<SocketAddr>,
+    last_seen: Instant,
+}
+
 struct Net {
     config: Config,
     inbound: Sender<NetInbound>,
@@ -116,8 +151,14 @@ struct Net {
     /// Switches we requested from the peer, awaiting a SwitchResult (with send time).
     pending_out: HashMap<StableId, Instant>,
     /// Monitors the peer asked us to switch, awaiting the local SetResult.
-    pending_in: HashMap<StableId, ()>,
+    pending_in: HashSet<StableId>,
     last_dial: Option<Instant>,
+    /// Machines heard on the LAN, keyed by machine id, for the hosts panel.
+    hosts: HashMap<Uuid, HostRecord>,
+    /// Last host list pushed to the UI, so `emit_hosts` only fires on change.
+    last_hosts: Vec<HostView>,
+    /// The host the user chose to link with; only this peer is dialed/adopted.
+    selected_peer: Option<Uuid>,
 }
 
 fn run(
@@ -131,12 +172,13 @@ fn run(
     discovery::spawn(
         config.machine_id,
         config.machine_name.clone(),
-        link::TCP_PORT,
+        config.comms_port,
         in_tx.clone(),
     );
     link::spawn_accept(
         config.machine_id,
         config.machine_name.clone(),
+        config.comms_port,
         local.clone(),
         in_tx.clone(),
     );
@@ -152,8 +194,11 @@ fn run(
         peer_monitors: Vec::new(),
         epoch_counter: 0,
         pending_out: HashMap::new(),
-        pending_in: HashMap::new(),
+        pending_in: HashSet::new(),
         last_dial: None,
+        hosts: HashMap::new(),
+        last_hosts: Vec::new(),
+        selected_peer: None,
     };
 
     loop {
@@ -205,7 +250,7 @@ impl Net {
                 }
             }
             NetCmd::LocalSetResult { id, result } => {
-                if self.pending_in.remove(&id).is_some() {
+                if self.pending_in.remove(&id) {
                     let (ok, current, error) = match result {
                         Ok(input) => (true, Some(input), None),
                         Err(e) => (false, None, Some(e)),
@@ -230,16 +275,51 @@ impl Net {
                     });
                 }
             }
+            NetCmd::SelectPeer(sel) => self.select_peer(sel),
+        }
+    }
+
+    fn select_peer(&mut self, sel: Option<Uuid>) {
+        self.selected_peer = sel;
+        // Selecting away from (or clearing) the current peer tears the link down.
+        if self.peer.as_ref().is_some_and(|p| Some(p.peer_id) != sel) {
+            self.disconnect();
+        }
+        // Dial the chosen host immediately if we know where it is.
+        if let Some(id) = sel
+            && !self.connected()
+            && let Some(sock) = self.hosts.get(&id).and_then(|h| h.sock)
+        {
+            self.last_dial = None;
+            self.maybe_dial(sock);
+        }
+        self.emit_hosts();
+    }
+
+    fn disconnect(&mut self) {
+        if self.peer.take().is_some() {
+            self.peer_monitors.clear();
+            self.last_dial = None;
+            self.emit(NetEvt::Status("disconnected".into()));
+            self.emit(NetEvt::PeerOffline);
+            self.push_owners();
         }
     }
 
     fn handle_candidate(&mut self, c: discovery::Candidate) {
-        if self.connected() {
-            return;
-        }
-        // Min-id machine is the connector; the other side waits to accept.
-        if self.config.machine_id < c.machine_id {
-            let addr = std::net::SocketAddr::new(c.ip, c.tcp_port);
+        let addr = SocketAddr::new(c.ip, c.tcp_port);
+        self.hosts.insert(
+            c.machine_id,
+            HostRecord {
+                name: c.machine_name,
+                sock: Some(addr),
+                last_seen: Instant::now(),
+            },
+        );
+        self.emit_hosts();
+
+        // Only dial the host the user picked; discovery just populates the list.
+        if !self.connected() && self.selected_peer == Some(c.machine_id) {
             self.maybe_dial(addr);
         }
     }
@@ -252,12 +332,18 @@ impl Net {
         peer_name: String,
         peer_monitors: Vec<MonitorInfo>,
     ) {
+        // Ignore anyone other than the host the user selected (None = accept the
+        // first suitor, so a peer that picks us can still establish the link).
+        if self.selected_peer.is_some_and(|sel| sel != peer_id) {
+            return;
+        }
         if !self.should_adopt(peer_id, initiated_by_me) {
             return; // dropping `stream` closes the losing connection
         }
 
         self.epoch_counter += 1;
         let epoch = self.epoch_counter;
+        let peer_addr = stream.peer_addr().ok();
         let out_tx = link::start_io(stream, epoch, self.inbound.clone());
         self.peer = Some(PeerConn {
             epoch,
@@ -266,9 +352,19 @@ impl Net {
             out_tx,
         });
         self.peer_monitors = peer_monitors;
+        // Keep the connected peer visible even if we haven't heard its announce yet.
+        self.hosts.insert(
+            peer_id,
+            HostRecord {
+                name: peer_name.clone(),
+                sock: peer_addr,
+                last_seen: Instant::now(),
+            },
+        );
 
         self.emit(NetEvt::Status(format!("connected to {peer_name}")));
         self.emit(NetEvt::PeerOnline { name: peer_name });
+        self.emit_hosts();
         self.push_owners();
         let infos = self.build_my_infos();
         self.send_to_peer(Message::State { monitors: infos });
@@ -301,7 +397,7 @@ impl Net {
             }
             Message::SwitchRequest { id, target } => {
                 if self.owner_of(&id) == Owner::Me {
-                    self.pending_in.insert(id.clone(), ());
+                    self.pending_in.insert(id.clone());
                     self.emit(NetEvt::ExecuteSwitch { id, target });
                 } else {
                     self.send_to_peer(Message::SwitchResult {
@@ -330,6 +426,7 @@ impl Net {
         self.emit(NetEvt::Status("peer disconnected".into()));
         self.emit(NetEvt::PeerOffline);
         self.push_owners();
+        self.emit_hosts();
     }
 
     fn tick(&mut self) {
@@ -348,14 +445,21 @@ impl Net {
             });
         }
 
+        // Keep chasing the selected host until the link is up.
         if !self.connected()
-            && let Some(host) = self.config.peer_host.clone()
+            && let Some(id) = self.selected_peer
+            && let Some(sock) = self.hosts.get(&id).and_then(|h| h.sock)
         {
-            self.dial_host(&host);
+            self.maybe_dial(sock);
         }
+
+        let peer_id = self.peer.as_ref().map(|p| p.peer_id);
+        self.hosts
+            .retain(|id, h| Some(*id) == peer_id || h.last_seen.elapsed() < HOST_DROP_AFTER);
+        self.emit_hosts();
     }
 
-    fn maybe_dial(&mut self, addr: std::net::SocketAddr) {
+    fn maybe_dial(&mut self, addr: SocketAddr) {
         if self.last_dial.is_some_and(|t| t.elapsed() < DIAL_COOLDOWN) {
             return;
         }
@@ -367,21 +471,6 @@ impl Net {
             self.local.clone(),
             self.inbound.clone(),
         );
-    }
-
-    fn dial_host(&mut self, host: &str) {
-        if self.last_dial.is_some_and(|t| t.elapsed() < DIAL_COOLDOWN) {
-            return;
-        }
-        let target = (host, link::TCP_PORT);
-        match target.to_socket_addrs() {
-            Ok(mut addrs) => {
-                if let Some(addr) = addrs.next() {
-                    self.maybe_dial(addr);
-                }
-            }
-            Err(e) => log::debug!("cannot resolve peer_host {host}: {e:#}"),
-        }
     }
 
     /// Learn this machine's home input on each monitor the first time we can read
@@ -442,6 +531,40 @@ impl Net {
             .collect();
         self.emit(NetEvt::Owners(owners));
     }
+
+    /// Rebuild the host list and push it only when it differs from the last one.
+    /// Called on every tick, so the Online→Offline transition surfaces without
+    /// needing a fresh announcement.
+    fn emit_hosts(&mut self) {
+        let peer_id = self.peer.as_ref().map(|p| p.peer_id);
+        let mut view: Vec<HostView> = self
+            .hosts
+            .iter()
+            .map(|(id, h)| {
+                let status = if Some(*id) == peer_id {
+                    HostStatus::Connected
+                } else if self.selected_peer == Some(*id) {
+                    HostStatus::Connecting
+                } else if h.last_seen.elapsed() < HOST_OFFLINE_AFTER {
+                    HostStatus::Online
+                } else {
+                    HostStatus::Offline
+                };
+                HostView {
+                    name: h.name.clone(),
+                    addr: h.sock.map(|s| s.to_string()).unwrap_or_default(),
+                    machine_id: *id,
+                    status,
+                }
+            })
+            .collect();
+        view.sort_by(|a, b| a.name.cmp(&b.name).then(a.machine_id.cmp(&b.machine_id)));
+
+        if view != self.last_hosts {
+            self.last_hosts = view.clone();
+            self.emit(NetEvt::Hosts(view));
+        }
+    }
 }
 
 /// Ownership from this machine's view. `Me` when we can read our home input on it;
@@ -462,6 +585,11 @@ fn compute_owner(
         && peer.current_input == peer.my_input
     {
         return Owner::Peer;
+    }
+    // A display we can see but can't read the input on (e.g. a TV that doesn't
+    // report VCP 0x60) is assumed ours, since the peer above isn't showing it.
+    if let Some((true, None)) = local {
+        return Owner::Me;
     }
     Owner::Unknown
 }
@@ -534,5 +662,18 @@ mod tests {
     fn unknown_when_my_input_not_yet_learned() {
         let owner = compute_owner(None, Some((true, Some(InputSource(0x11)))), None);
         assert_eq!(owner, Owner::Unknown);
+    }
+
+    #[test]
+    fn present_unreadable_display_is_mine_when_peer_not_showing_it() {
+        // A TV we can see but can't read the input on, with no peer claim.
+        let owner = compute_owner(None, Some((true, None)), None);
+        assert_eq!(owner, Owner::Me);
+    }
+
+    #[test]
+    fn present_unreadable_display_yields_to_peer_that_shows_it() {
+        let owner = compute_owner(None, Some((true, None)), Some(&peer_info(0x12, Some(0x12))));
+        assert_eq!(owner, Owner::Peer);
     }
 }

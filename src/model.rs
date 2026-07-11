@@ -1,4 +1,5 @@
 use crate::ddc::{InputSource, StableId};
+use crate::net::HostView;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Owner {
@@ -24,4 +25,5 @@ pub struct AppState {
     pub status: String,
     pub peer_online: bool,
     pub peer_name: Option<String>,
+    pub hosts: Vec<HostView>,
 }
