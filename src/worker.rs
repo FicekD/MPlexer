@@ -70,8 +70,6 @@ fn run(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::Contex
                 }
             }
             Err(RecvTimeoutError::Timeout) => {
-                // Refresh each monitor's current input; a failed read (e.g. a TV that
-                // doesn't report input over DDC) just leaves the last known value.
                 for m in monitors.iter_mut() {
                     let _ = m.read_input();
                 }
@@ -88,9 +86,6 @@ fn run(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::Contex
     }
 }
 
-/// Every enumerated handle is a display physically attached to this machine, so
-/// `available` reports presence, not input-readability. A monitor that drops out
-/// of a later `enumerate()` is marked unavailable by the UI's merge step.
 fn snapshot(monitors: &[Monitor]) -> Vec<MonitorSnapshot> {
     monitors
         .iter()

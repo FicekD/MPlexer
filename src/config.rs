@@ -11,13 +11,10 @@ pub struct Config {
     pub machine_name: String,
     #[serde(default)]
     pub input_labels: HashMap<String, String>,
-    /// Generated once on first run and persisted; identifies this machine on the LAN.
     #[serde(default = "Uuid::new_v4")]
     pub machine_id: Uuid,
-    /// TCP port this machine listens on and advertises for peer comms. Applied at startup.
     #[serde(default = "default_comms_port")]
     pub comms_port: u16,
-    /// The input this machine occupies on each monitor, learned while active and persisted.
     #[serde(default)]
     pub my_inputs: HashMap<StableId, InputSource>,
 }

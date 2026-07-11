@@ -1,6 +1,5 @@
 mod config;
 mod ddc;
-mod logging;
 mod model;
 mod net;
 mod ui;
@@ -43,7 +42,8 @@ enum CliCommand {
 }
 
 fn main() -> Result<()> {
-    logging::init();
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+
     let cli = Cli::parse();
 
     if !cli.cli {
@@ -66,7 +66,6 @@ fn run_gui() -> Result<()> {
         log::warn!("failed to load config, using defaults: {e:#}");
         config::Config::default()
     });
-    // Persist so a freshly generated machine_id (and any new defaults) sticks.
     if let Err(e) = cfg.save() {
         log::warn!("failed to write config: {e:#}");
     }
@@ -75,9 +74,13 @@ fn run_gui() -> Result<()> {
     let (evt_tx, evt_rx) = std::sync::mpsc::channel();
     let (net_evt_tx, net_evt_rx) = std::sync::mpsc::channel();
 
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1600.0, 900.0]),
+        ..Default::default()
+    };
     eframe::run_native(
         "MPlexer",
-        eframe::NativeOptions::default(),
+        options,
         Box::new(move |cc| {
             worker::spawn(cmd_rx, evt_tx, cc.egui_ctx.clone());
             let net = net::spawn(cfg.clone(), net_evt_tx, cc.egui_ctx.clone());

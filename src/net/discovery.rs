@@ -11,7 +11,6 @@ use super::NetInbound;
 pub const UDP_PORT: u16 = 48619;
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(3);
 
-/// A peer heard on the LAN, handed to the net task to decide whether to connect.
 pub struct Candidate {
     pub ip: IpAddr,
     pub tcp_port: u16,
@@ -26,8 +25,6 @@ struct Announce {
     tcp_port: u16,
 }
 
-/// Bind the discovery socket and run the announce + listen loops on their own threads.
-/// On bind failure discovery is skipped and no LAN hosts will appear for selection.
 pub fn spawn(machine_id: Uuid, machine_name: String, tcp_port: u16, inbound: Sender<NetInbound>) {
     let socket = match UdpSocket::bind(("0.0.0.0", UDP_PORT)) {
         Ok(s) => s,

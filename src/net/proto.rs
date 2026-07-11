@@ -3,13 +3,10 @@ use uuid::Uuid;
 
 use crate::ddc::{InputSource, StableId};
 
-/// One machine's view of a single monitor, shared over the wire.
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct MonitorInfo {
     pub id: StableId,
-    /// The sender's own input on this monitor (its "home" input).
     pub my_input: Option<InputSource>,
-    /// What the sender currently reads; `None` when the monitor is unreachable from its side.
     pub current_input: Option<InputSource>,
     pub valid_inputs: Vec<InputSource>,
     pub label: String,
@@ -18,17 +15,13 @@ pub struct MonitorInfo {
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(tag = "type")]
 pub enum Message {
-    /// First message after TCP connect: identity plus a full monitor view.
     Hello {
         machine_id: Uuid,
         machine_name: String,
         monitors: Vec<MonitorInfo>,
     },
-    /// Full state push, authoritative from the sender's side.
     State { monitors: Vec<MonitorInfo> },
-    /// "Please switch monitor <id> to <target>." Executed by the current owner.
     SwitchRequest { id: StableId, target: InputSource },
-    /// Result of a SwitchRequest the receiver executed.
     SwitchResult {
         id: StableId,
         ok: bool,

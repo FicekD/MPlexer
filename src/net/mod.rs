@@ -21,26 +21,19 @@ use proto::{Message, MonitorInfo};
 const TICK: Duration = Duration::from_secs(1);
 const DIAL_COOLDOWN: Duration = Duration::from_secs(4);
 const SWITCH_TIMEOUT: Duration = Duration::from_secs(8);
-/// A host that stops announcing shows Offline until it is finally dropped.
 const HOST_OFFLINE_AFTER: Duration = Duration::from_secs(7);
 const HOST_DROP_AFTER: Duration = Duration::from_secs(30);
 
-/// Commands from the UI into the net task.
 pub enum NetCmd {
-    /// Latest local monitor snapshot from the worker.
     LocalState(Vec<MonitorSnapshot>),
-    /// Result of a local `SetInput`, used to answer a peer's SwitchRequest.
     LocalSetResult {
         id: StableId,
         result: Result<InputSource, String>,
     },
-    /// User asked to switch a monitor the peer owns.
     RequestSwitch { id: StableId, target: InputSource },
-    /// User picked a host to link with (or `None` to disconnect).
     SelectPeer(Option<Uuid>),
 }
 
-/// A machine seen on the LAN (or the manually-dialed peer), for the hosts panel.
 #[derive(Clone, PartialEq)]
 pub struct HostView {
     pub name: String,
@@ -51,32 +44,23 @@ pub struct HostView {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HostStatus {
-    /// The active peer link.
     Connected,
-    /// Selected by the user; a link is being established.
     Connecting,
-    /// Announcing on the LAN right now.
     Online,
-    /// Seen recently but has since gone quiet.
     Offline,
 }
 
-/// Events from the net task out to the UI.
 pub enum NetEvt {
     PeerOnline {
         name: String,
     },
     PeerOffline,
-    /// LAN hosts discovered (plus the connected peer), sorted for display.
     Hosts(Vec<HostView>),
-    /// Authoritative owner per local monitor id.
     Owners(HashMap<StableId, Owner>),
-    /// The peer asked us (the owner) to switch a monitor; run it on the worker.
     ExecuteSwitch {
         id: StableId,
         target: InputSource,
     },
-    /// Reply to a `RequestSwitch` we sent to the peer.
     SwitchResult {
         id: StableId,
         ok: bool,
@@ -85,8 +69,6 @@ pub enum NetEvt {
     Status(String),
 }
 
-/// Internal fan-in for the net task: UI commands, discovery, and link I/O all
-/// funnel through one channel so a single thread owns all coordination state.
 pub enum NetInbound {
     Cmd(NetCmd),
     Candidate(discovery::Candidate),
@@ -106,7 +88,6 @@ pub enum NetInbound {
     },
 }
 
-/// UI-facing handle to send commands to the net task.
 #[derive(Clone)]
 pub struct NetHandle {
     tx: Sender<NetInbound>,
@@ -148,16 +129,11 @@ struct Net {
     peer: Option<PeerConn>,
     peer_monitors: Vec<MonitorInfo>,
     epoch_counter: u64,
-    /// Switches we requested from the peer, awaiting a SwitchResult (with send time).
     pending_out: HashMap<StableId, Instant>,
-    /// Monitors the peer asked us to switch, awaiting the local SetResult.
     pending_in: HashSet<StableId>,
     last_dial: Option<Instant>,
-    /// Machines heard on the LAN, keyed by machine id, for the hosts panel.
     hosts: HashMap<Uuid, HostRecord>,
-    /// Last host list pushed to the UI, so `emit_hosts` only fires on change.
     last_hosts: Vec<HostView>,
-    /// The host the user chose to link with; only this peer is dialed/adopted.
     selected_peer: Option<Uuid>,
 }
 
@@ -281,11 +257,9 @@ impl Net {
 
     fn select_peer(&mut self, sel: Option<Uuid>) {
         self.selected_peer = sel;
-        // Selecting away from (or clearing) the current peer tears the link down.
         if self.peer.as_ref().is_some_and(|p| Some(p.peer_id) != sel) {
             self.disconnect();
         }
-        // Dial the chosen host immediately if we know where it is.
         if let Some(id) = sel
             && !self.connected()
             && let Some(sock) = self.hosts.get(&id).and_then(|h| h.sock)
@@ -318,7 +292,6 @@ impl Net {
         );
         self.emit_hosts();
 
-        // Only dial the host the user picked; discovery just populates the list.
         if !self.connected() && self.selected_peer == Some(c.machine_id) {
             self.maybe_dial(addr);
         }
@@ -332,8 +305,6 @@ impl Net {
         peer_name: String,
         peer_monitors: Vec<MonitorInfo>,
     ) {
-        // Ignore anyone other than the host the user selected (None = accept the
-        // first suitor, so a peer that picks us can still establish the link).
         if self.selected_peer.is_some_and(|sel| sel != peer_id) {
             return;
         }
@@ -352,7 +323,6 @@ impl Net {
             out_tx,
         });
         self.peer_monitors = peer_monitors;
-        // Keep the connected peer visible even if we haven't heard its announce yet.
         self.hosts.insert(
             peer_id,
             HostRecord {
@@ -370,9 +340,6 @@ impl Net {
         self.send_to_peer(Message::State { monitors: infos });
     }
 
-    /// Keep exactly one link per peer, favouring the canonical connector (min-id
-    /// dials). A lone non-canonical link is still adopted so we are never left
-    /// unconnected when broadcast only works one way.
     fn should_adopt(&self, peer_id: Uuid, initiated_by_me: bool) -> bool {
         let canonical = initiated_by_me == (self.config.machine_id < peer_id);
         match &self.peer {
@@ -388,7 +355,7 @@ impl Net {
 
     fn handle_link_message(&mut self, epoch: u64, msg: Message) {
         if self.peer.as_ref().map(|p| p.epoch) != Some(epoch) {
-            return; // stale link
+            return;
         }
         match msg {
             Message::Hello { monitors, .. } | Message::State { monitors } => {
@@ -422,7 +389,7 @@ impl Net {
         }
         self.peer = None;
         self.peer_monitors.clear();
-        self.last_dial = None; // allow immediate re-dial
+        self.last_dial = None;
         self.emit(NetEvt::Status("peer disconnected".into()));
         self.emit(NetEvt::PeerOffline);
         self.push_owners();
@@ -445,7 +412,6 @@ impl Net {
             });
         }
 
-        // Keep chasing the selected host until the link is up.
         if !self.connected()
             && let Some(id) = self.selected_peer
             && let Some(sock) = self.hosts.get(&id).and_then(|h| h.sock)
@@ -473,9 +439,6 @@ impl Net {
         );
     }
 
-    /// Learn this machine's home input on each monitor the first time we can read
-    /// it while active, then persist. Learned once so a later handoff (which reads
-    /// the *peer's* input on our channel) can't overwrite it.
     fn learn_my_inputs(&mut self) {
         let mut changed = false;
         for snap in &self.local_snaps {
@@ -532,9 +495,6 @@ impl Net {
         self.emit(NetEvt::Owners(owners));
     }
 
-    /// Rebuild the host list and push it only when it differs from the last one.
-    /// Called on every tick, so the Online→Offline transition surfaces without
-    /// needing a fresh announcement.
     fn emit_hosts(&mut self) {
         let peer_id = self.peer.as_ref().map(|p| p.peer_id);
         let mut view: Vec<HostView> = self
@@ -567,9 +527,6 @@ impl Net {
     }
 }
 
-/// Ownership from this machine's view. `Me` when we can read our home input on it;
-/// otherwise `Peer` when the peer reports it sits on the peer's home input; else
-/// `Unknown`.
 fn compute_owner(
     my_input: Option<InputSource>,
     local: Option<(bool, Option<InputSource>)>,

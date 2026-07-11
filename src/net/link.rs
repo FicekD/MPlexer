@@ -10,17 +10,14 @@ use uuid::Uuid;
 use super::NetInbound;
 use super::proto::{Message, MonitorInfo};
 
-pub const TCP_PORT: u16 = 48620;
+pub const TCP_PORT: u16 = 48669;
 const MAX_LINE: usize = 64 * 1024;
 const HEARTBEAT: Duration = Duration::from_secs(5);
 const READ_TIMEOUT: Duration = Duration::from_secs(15);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// Snapshot of the local monitor view, shared with dial/accept threads so the
-/// `Hello` handshake carries our current state.
 pub type LocalView = Arc<Mutex<Vec<MonitorInfo>>>;
 
-/// Accept incoming peer connections forever, running each handshake on its own thread.
 pub fn spawn_accept(
     my_id: Uuid,
     my_name: String,
@@ -52,7 +49,6 @@ pub fn spawn_accept(
     });
 }
 
-/// Dial a peer and run the handshake on its own thread.
 pub fn spawn_dial(
     addr: SocketAddr,
     my_id: Uuid,
@@ -94,8 +90,6 @@ fn run_handshake(
     }
 }
 
-/// Exchange `Hello`s: send ours, read theirs. Reads exactly one line so no bytes
-/// are buffered past the handshake for the reader loop.
 fn handshake(
     stream: &mut TcpStream,
     my_id: Uuid,
@@ -128,8 +122,6 @@ fn handshake(
     }
 }
 
-/// Adopt an established connection: spawn reader + writer loops bound to `epoch`,
-/// returning the sender used to push messages to the peer.
 pub fn start_io(stream: TcpStream, epoch: u64, inbound: Sender<NetInbound>) -> Sender<Message> {
     stream.set_read_timeout(Some(READ_TIMEOUT)).ok();
     let read_stream = stream
@@ -200,8 +192,6 @@ fn write_message(stream: &mut TcpStream, msg: &Message) -> io::Result<()> {
     stream.flush()
 }
 
-/// Read one `\n`-terminated line without buffering past it (used only during the
-/// handshake, so the follow-on reader keeps a clean stream).
 fn read_line_raw(stream: &mut TcpStream, max: usize) -> io::Result<String> {
     let mut buf = Vec::new();
     let mut byte = [0u8; 1];
