@@ -57,6 +57,13 @@ pub fn led(ui: &mut egui::Ui, color: Color32) {
         .circle_stroke(rect.center(), 4.5, Stroke::new(1.0, color.linear_multiply(0.4)));
 }
 
+/// Small vertical accent bar used before section headings.
+pub fn accent_bar(ui: &mut egui::Ui, p: &Palette) {
+    let (rect, _) = ui.allocate_exact_size(Vec2::new(3.0, 15.0), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 1.0, p.accent);
+    ui.add_space(2.0);
+}
+
 /// Paint a stylized monitor glyph filling `rect`, tinted by `accent`.
 pub fn draw_monitor(painter: &egui::Painter, rect: Rect, p: &Palette, accent: Color32) {
     let w = rect.width();

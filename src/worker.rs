@@ -34,6 +34,7 @@ pub fn spawn(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::
 
 fn run(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::Context) {
     let mut monitors = ddc::enumerate();
+    log::info!("worker started: {} monitor(s) enumerated", monitors.len());
 
     let mut last = snapshot(&monitors);
     if emit(&evt_tx, &ctx, WorkerEvt::Monitors(last.clone())).is_err() {
@@ -44,6 +45,7 @@ fn run(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::Contex
         match cmd_rx.recv_timeout(POLL_INTERVAL) {
             Ok(WorkerCmd::Refresh) => {
                 monitors = ddc::enumerate();
+                log::info!("refresh: {} monitor(s) enumerated", monitors.len());
                 last = snapshot(&monitors);
                 if emit(&evt_tx, &ctx, WorkerEvt::Monitors(last.clone())).is_err() {
                     return;
@@ -53,6 +55,7 @@ fn run(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::Contex
                 let mut result = Err(format!("monitor {id} not found"));
                 if let Some(idx) = monitors.iter().position(|m| m.id == id) {
                     let m = &mut monitors[idx];
+                    log::info!("switching '{}' to {} (0x{:02X})", m.name, input.label(), input.0);
                     result = match m.write_input(input) {
                         Ok(()) => {
                             std::thread::sleep(SETTLE_DELAY);
@@ -60,6 +63,10 @@ fn run(cmd_rx: Receiver<WorkerCmd>, evt_tx: Sender<WorkerEvt>, ctx: egui::Contex
                         }
                         Err(e) => Err(e.to_string()),
                     };
+                }
+                match &result {
+                    Ok(got) => log::info!("switch of {id} confirmed at 0x{:02X}", got.0),
+                    Err(e) => log::warn!("switch of {id} failed: {e}"),
                 }
                 if emit(&evt_tx, &ctx, WorkerEvt::SetResult { id, result }).is_err() {
                     return;

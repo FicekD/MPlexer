@@ -1,5 +1,6 @@
 mod config;
 mod ddc;
+mod logging;
 mod model;
 mod net;
 mod ui;
@@ -42,12 +43,12 @@ enum CliCommand {
 }
 
 fn main() -> Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    let log_buffer = logging::init();
 
     let cli = Cli::parse();
 
     if !cli.cli {
-        return run_gui();
+        return run_gui(log_buffer);
     }
 
     let Some(command) = cli.command else {
@@ -61,7 +62,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_gui() -> Result<()> {
+fn run_gui(log_buffer: logging::LogBuffer) -> Result<()> {
     let cfg = config::Config::load().unwrap_or_else(|e| {
         log::warn!("failed to load config, using defaults: {e:#}");
         config::Config::default()
@@ -69,13 +70,21 @@ fn run_gui() -> Result<()> {
     if let Err(e) = cfg.save() {
         log::warn!("failed to write config: {e:#}");
     }
+    log::info!(
+        "starting GUI as '{}' on comms port {}",
+        cfg.machine_name,
+        cfg.comms_port
+    );
 
     let (cmd_tx, cmd_rx) = std::sync::mpsc::channel();
     let (evt_tx, evt_rx) = std::sync::mpsc::channel();
     let (net_evt_tx, net_evt_rx) = std::sync::mpsc::channel();
 
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([1600.0, 900.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1600.0, 900.0])
+            .with_min_inner_size([900.0, 600.0])
+            .with_decorations(false),
         ..Default::default()
     };
     eframe::run_native(
@@ -85,7 +94,7 @@ fn run_gui() -> Result<()> {
             worker::spawn(cmd_rx, evt_tx, cc.egui_ctx.clone());
             let net = net::spawn(cfg.clone(), net_evt_tx, cc.egui_ctx.clone());
             Ok(Box::new(ui::MplexerApp::new(
-                cfg, cmd_tx, evt_rx, net, net_evt_rx,
+                cfg, cmd_tx, evt_rx, net, net_evt_rx, log_buffer,
             )))
         }),
     )

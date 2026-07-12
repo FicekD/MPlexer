@@ -256,6 +256,10 @@ impl Net {
     }
 
     fn select_peer(&mut self, sel: Option<Uuid>) {
+        match sel {
+            Some(id) => log::info!("linking to peer {id}"),
+            None => log::info!("unlinking from peer"),
+        }
         self.selected_peer = sel;
         if self.peer.as_ref().is_some_and(|p| Some(p.peer_id) != sel) {
             self.disconnect();
@@ -282,6 +286,9 @@ impl Net {
 
     fn handle_candidate(&mut self, c: discovery::Candidate) {
         let addr = SocketAddr::new(c.ip, c.tcp_port);
+        if !self.hosts.contains_key(&c.machine_id) {
+            log::info!("discovered host '{}' at {}", c.machine_name, addr);
+        }
         self.hosts.insert(
             c.machine_id,
             HostRecord {
@@ -332,6 +339,7 @@ impl Net {
             },
         );
 
+        log::info!("connected to peer '{peer_name}' ({peer_id})");
         self.emit(NetEvt::Status(format!("connected to {peer_name}")));
         self.emit(NetEvt::PeerOnline { name: peer_name });
         self.emit_hosts();
@@ -364,6 +372,7 @@ impl Net {
             }
             Message::SwitchRequest { id, target } => {
                 if self.owner_of(&id) == Owner::Me {
+                    log::info!("peer requested switch of {id} to 0x{:02X}", target.0);
                     self.pending_in.insert(id.clone());
                     self.emit(NetEvt::ExecuteSwitch { id, target });
                 } else {
@@ -387,6 +396,7 @@ impl Net {
         if self.peer.as_ref().map(|p| p.epoch) != Some(epoch) {
             return;
         }
+        log::info!("peer link closed");
         self.peer = None;
         self.peer_monitors.clear();
         self.last_dial = None;
@@ -450,8 +460,11 @@ impl Net {
                 changed = true;
             }
         }
-        if changed && let Err(e) = self.config.save() {
-            log::warn!("failed to persist learned inputs: {e:#}");
+        if changed {
+            let learned = self.config.my_inputs.clone();
+            if let Err(e) = Config::persist_with(|c| c.my_inputs = learned) {
+                log::warn!("failed to persist learned inputs: {e:#}");
+            }
         }
     }
 

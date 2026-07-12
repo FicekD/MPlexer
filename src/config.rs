@@ -17,6 +17,10 @@ pub struct Config {
     pub comms_port: u16,
     #[serde(default)]
     pub my_inputs: HashMap<StableId, InputSource>,
+    #[serde(default = "default_dark")]
+    pub dark_theme: bool,
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: u32,
 }
 
 impl Default for Config {
@@ -27,12 +31,22 @@ impl Default for Config {
             machine_id: Uuid::new_v4(),
             comms_port: default_comms_port(),
             my_inputs: HashMap::new(),
+            dark_theme: default_dark(),
+            ui_scale: default_ui_scale(),
         }
     }
 }
 
 fn default_comms_port() -> u16 {
     crate::net::TCP_PORT
+}
+
+fn default_dark() -> bool {
+    true
+}
+
+fn default_ui_scale() -> u32 {
+    100
 }
 
 impl Config {
@@ -56,6 +70,12 @@ impl Config {
         }
         let bytes = serde_json::to_vec_pretty(self)?;
         std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))
+    }
+
+    pub fn persist_with(f: impl FnOnce(&mut Config)) -> Result<()> {
+        let mut cfg = Self::load().unwrap_or_else(|_| Self::default());
+        f(&mut cfg);
+        cfg.save()
     }
 }
 
