@@ -31,19 +31,22 @@ pub fn stable_id(
         return StableId(format!("unknown-{fallback_index}"));
     }
 
-    let unique = normalize(serial_number).or_else(|| serial.map(|s| s.to_string()));
-    if unique.is_none() {
-        log::warn!(
-            "display {}/{} has no serial number, its StableId may collide with an identical panel",
-            manufacturer.as_deref().unwrap_or("unknown"),
-            model.as_deref().unwrap_or("unknown"),
-        );
-    }
+    let unique = match normalize(serial_number).or_else(|| serial.map(|s| s.to_string())) {
+        Some(u) => u,
+        None => {
+            log::warn!(
+                "display {}/{} has no serial number; keeping panels apart by enumeration index {fallback_index}",
+                manufacturer.as_deref().unwrap_or("unknown"),
+                model.as_deref().unwrap_or("unknown"),
+            );
+            format!("idx{fallback_index}")
+        }
+    };
 
     let parts = [
         manufacturer.unwrap_or_else(|| "unknown".to_string()),
         model.unwrap_or_else(|| "unknown".to_string()),
-        unique.unwrap_or_default(),
+        unique,
     ];
     StableId(parts.join("-"))
 }
@@ -78,11 +81,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_serial_falls_back_to_model_fields_deterministically() {
+    fn serial_less_identical_panels_are_kept_apart_by_index() {
         let a = stable_id(Some("DEL"), Some("U2419H"), None, None, None, 0);
-        let b = stable_id(Some("DEL"), Some("U2419H"), None, None, None, 7);
-        assert_eq!(a, b);
-        assert_eq!(a.as_str(), "del-u2419h-");
+        let b = stable_id(Some("DEL"), Some("U2419H"), None, None, None, 1);
+        assert_ne!(a, b);
+        assert_eq!(a.as_str(), "del-u2419h-idx0");
     }
 
     #[test]

@@ -196,7 +196,8 @@ fn monitor_card(
         });
 }
 
-/// The per-monitor input dropdown. Returns the newly picked input, if any.
+/// The per-monitor input dropdown, listing only inputs confirmed by observation.
+/// Returns a newly picked input, if any.
 fn input_selector(
     ui: &mut egui::Ui,
     m: &MonitorState,

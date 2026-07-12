@@ -26,6 +26,9 @@ pub enum NetCmd {
     LocalState(Vec<MonitorSnapshot>),
     RequestSwitch { id: StableId, target: InputSource },
     SelectPeer(Option<Uuid>),
+    /// Drop discovered hosts (keeping any live connection) so the list rebuilds
+    /// from fresh announces.
+    RefreshHosts,
 }
 
 #[derive(Clone, PartialEq)]
@@ -213,6 +216,12 @@ impl Net {
                 }
             }
             NetCmd::SelectPeer(sel) => self.select_peer(sel),
+            NetCmd::RefreshHosts => {
+                let peer_id = self.peer.as_ref().map(|p| p.peer_id);
+                self.hosts.retain(|id, _| Some(*id) == peer_id);
+                log::info!("host list refreshed");
+                self.emit_hosts();
+            }
         }
     }
 
