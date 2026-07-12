@@ -455,6 +455,7 @@ mod tests {
             current_input: Some(InputSource(0x12)),
             observed_inputs: vec![InputSource(0x12), InputSource(0x0F)],
             available: true,
+            edid: Default::default(),
         }
     }
 

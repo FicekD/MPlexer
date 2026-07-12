@@ -26,6 +26,7 @@ pub struct MplexerApp {
     pub(super) port_buf: String,
     pub(super) log_buffer: LogBuffer,
     pub(super) show_log: bool,
+    pub(super) log_level: log::Level,
 }
 
 impl MplexerApp {
@@ -53,6 +54,7 @@ impl MplexerApp {
             port_buf,
             log_buffer,
             show_log: false,
+            log_level: log::Level::Info,
         }
     }
 

@@ -2268,6 +2268,7 @@ dependencies = [
  "clap",
  "ddc-hi",
  "directories",
+ "edid",
  "eframe",
  "egui",
  "env_logger",

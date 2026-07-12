@@ -44,14 +44,12 @@ impl MplexerApp {
                     );
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if ui
-                            .button(RichText::new("\u{21BB} RESCAN").size(9.0))
+                            .button(RichText::new("\u{21BB} REFRESH").size(9.0))
                             .on_hover_text("Clear and rescan the LAN for hosts")
                             .clicked()
                         {
                             self.net.send(NetCmd::RefreshHosts);
                         }
-                        ui.add_space(6.0);
-                        ui.label(RichText::new("CLICK TO LINK").color(p.muted).size(9.0));
                     });
                 });
                 ui.add_space(4.0);

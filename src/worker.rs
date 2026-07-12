@@ -3,7 +3,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::ddc::{self, InputSource, Monitor, StableId};
+use crate::ddc::{self, EdidInfo, InputSource, Monitor, StableId};
 
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
 const SETTLE_DELAY: Duration = Duration::from_secs(1);
@@ -29,6 +29,7 @@ pub struct MonitorSnapshot {
     pub current_input: Option<InputSource>,
     pub observed_inputs: Vec<InputSource>,
     pub available: bool,
+    pub edid: EdidInfo,
 }
 
 pub fn spawn(
@@ -170,6 +171,7 @@ fn snapshot(
                 current_input: m.current_input,
                 observed_inputs: inputs,
                 available: true,
+                edid: m.edid.clone(),
             }
         })
         .collect()

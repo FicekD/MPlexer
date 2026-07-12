@@ -1,6 +1,8 @@
+pub mod edid;
 pub mod identity;
 pub mod inputs;
 
+pub use edid::EdidInfo;
 pub use identity::StableId;
 pub use inputs::InputSource;
 
@@ -21,6 +23,7 @@ pub struct Monitor {
     pub controllable: bool,
     pub current_input: Option<InputSource>,
     pub caps_inputs: Vec<InputSource>,
+    pub edid: EdidInfo,
     handle: Display,
 }
 
@@ -33,23 +36,39 @@ struct Candidate {
 }
 
 pub fn enumerate() -> Vec<Monitor> {
-    let mut candidates: Vec<Candidate> = Display::enumerate()
+    log::info!("scanning for monitors\u{2026}");
+    let raw = Display::enumerate();
+    log::info!("ddc-hi enumerate() returned {} raw display handle(s)", raw.len());
+
+    let mut candidates: Vec<Candidate> = raw
         .into_iter()
         .enumerate()
         .map(|(index, mut display)| {
-            if let Err(e) = display.update_capabilities() {
-                log::warn!("failed to read capabilities for display {index}: {e:#}");
+            let backend = display.info.backend;
+            log::debug!("[{index}] probing via {backend} (id={})", display.info.id);
+
+            match display.update_capabilities() {
+                Ok(()) => log::debug!("[{index}] {backend}: capabilities updated"),
+                Err(e) => log::warn!("[{index}] {backend}: failed to read capabilities: {e:#}"),
             }
 
-            let log_name = display
-                .info
+            let info = &display.info;
+            let has_edid = info.edid_data.is_some();
+            let edid_len = info.edid_data.as_ref().map_or(0, Vec::len);
+            log::debug!(
+                "[{index}] {backend}: model={:?} mfr={:?} serial={:?}/{:?} edid={}",
+                info.model_name,
+                info.manufacturer_id,
+                info.serial_number,
+                info.serial,
+                if has_edid { format!("{edid_len} bytes") } else { "none".into() },
+            );
+
+            let log_name = info
                 .model_name
                 .clone()
                 .unwrap_or_else(|| format!("Monitor {index}"));
-
-            let has_edid = display.info.edid_data.is_some();
-            let model_key = display
-                .info
+            let model_key = info
                 .model_name
                 .as_deref()
                 .map(|s| s.trim().to_lowercase())
@@ -57,15 +76,25 @@ pub fn enumerate() -> Vec<Monitor> {
 
             let retries = if has_edid || model_key.is_some() { READ_RETRIES } else { 1 };
             let current_input = read_current_input(&mut display, &log_name, retries);
+            match current_input {
+                Some(i) => log::debug!("[{index}] {log_name}: current input {}", i.label()),
+                None => log::debug!("[{index}] {log_name}: input source unreadable over DDC/CI"),
+            }
 
             let caps_string = match display.handle.capabilities_string() {
                 Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
                 Err(e) => {
-                    log::warn!("failed to read capabilities string on {log_name}: {e:#}");
+                    log::warn!("[{index}] {log_name}: failed to read capabilities string: {e:#}");
                     String::new()
                 }
             };
             let caps_inputs = inputs::parse_input_list(&caps_string);
+            log::debug!(
+                "[{index}] {log_name}: capabilities string {} bytes, advertises {} input(s): [{}]",
+                caps_string.len(),
+                caps_inputs.len(),
+                labels(&caps_inputs),
+            );
 
             Candidate {
                 display,
@@ -77,18 +106,22 @@ pub fn enumerate() -> Vec<Monitor> {
         })
         .collect();
 
+    log::debug!("{} candidate(s) before dedup/ghost filtering", candidates.len());
     drop_backend_duplicates(&mut candidates);
 
     candidates.retain(|c| {
         let communicating = c.current_input.is_some() || !c.caps_inputs.is_empty();
         let keep = !is_ghost(c.has_edid, c.model_key.is_some(), communicating);
         if !keep {
-            log::debug!("dropping anonymous non-responsive display handle");
+            log::info!(
+                "dropping ghost handle ({}): no EDID, no model name, no DDC response",
+                c.display.info.backend,
+            );
         }
         keep
     });
 
-    candidates
+    let monitors: Vec<Monitor> = candidates
         .into_iter()
         .enumerate()
         .map(|(index, c)| {
@@ -107,6 +140,19 @@ pub fn enumerate() -> Vec<Monitor> {
                 .unwrap_or_else(|| format!("Monitor {index}"));
 
             let controllable = c.current_input.is_some() || !c.caps_inputs.is_empty();
+            let edid = edid::extract(
+                info.edid_data.as_deref(),
+                info.serial_number.as_deref(),
+                info.serial,
+            );
+
+            log::info!(
+                "detected monitor [{index}] '{name}' (id={id}) controllable={controllable} \
+                 current={} serial={} inputs=[{}]",
+                c.current_input.map_or_else(|| "?".into(), |i| i.label()),
+                edid.serial.as_deref().unwrap_or("?"),
+                labels(&c.caps_inputs),
+            );
 
             Monitor {
                 id,
@@ -114,20 +160,39 @@ pub fn enumerate() -> Vec<Monitor> {
                 controllable,
                 current_input: c.current_input,
                 caps_inputs: c.caps_inputs,
+                edid,
                 handle: c.display,
             }
         })
-        .collect()
+        .collect();
+
+    log::info!("discovery complete: {} monitor(s) detected", monitors.len());
+    monitors
+}
+
+fn labels(inputs: &[InputSource]) -> String {
+    inputs.iter().map(|i| i.label()).collect::<Vec<_>>().join(" ")
 }
 
 fn read_current_input(display: &mut Display, log_name: &str, retries: usize) -> Option<InputSource> {
     for attempt in 1..=retries {
         match display.handle.get_vcp_feature(VCP_INPUT_SOURCE) {
-            Ok(v) => return Some(InputSource(v.value() as u8)),
+            Ok(v) => {
+                if attempt > 1 {
+                    log::debug!("VCP 0x60 on {log_name} succeeded on attempt {attempt}/{retries}");
+                }
+                return Some(InputSource(v.value() as u8));
+            }
             Err(e) if attempt == retries => {
                 log::warn!("failed to read VCP 0x60 on {log_name} after {attempt} attempt(s): {e:#}");
             }
-            Err(_) => std::thread::sleep(RETRY_DELAY),
+            Err(e) => {
+                log::debug!(
+                    "VCP 0x60 on {log_name} attempt {attempt}/{retries} failed: {e:#}; retrying in {}ms",
+                    RETRY_DELAY.as_millis(),
+                );
+                std::thread::sleep(RETRY_DELAY);
+            }
         }
     }
     None
@@ -139,7 +204,17 @@ fn drop_backend_duplicates(candidates: &mut Vec<Candidate>) {
         .map(|c| (c.has_edid, c.model_key.as_deref()))
         .collect();
     let mut is_duplicate = duplicate_flags(&entries).into_iter();
-    candidates.retain(|_| !is_duplicate.next().unwrap());
+    candidates.retain(|c| {
+        let dup = is_duplicate.next().unwrap();
+        if dup {
+            log::info!(
+                "dropping backend-duplicate handle ({}) for '{}': EDID-less copy of an EDID-bearing panel",
+                c.display.info.backend,
+                c.model_key.as_deref().unwrap_or("?"),
+            );
+        }
+        !dup
+    });
 }
 
 fn is_ghost(has_edid: bool, has_model: bool, communicating: bool) -> bool {

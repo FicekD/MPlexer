@@ -7,6 +7,7 @@ edition = "2024"
 anyhow = "1.0.103"
 clap = { version = "4.6.1", features = ["derive"] }
 ddc-hi = "0.4.1"
+edid = "0.3.0"
 directories = "6.0.0"
 eframe = "0.35.0"
 egui = "0.35.0"

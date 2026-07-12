@@ -15,11 +15,22 @@ impl MplexerApp {
                 if ui.button(RichText::new("CLEAR").size(10.0)).clicked() {
                     self.log_buffer.lock().unwrap().clear();
                 }
-                let count = self.log_buffer.lock().unwrap().len();
-                ui.label(RichText::new(format!("{count} LINES")).color(p.muted).size(10.0));
+                level_filter(ui, &mut self.log_level);
             });
         });
         ui.add_space(4.0);
+
+        // The buffer holds everything down to DEBUG; the dropdown filters which
+        // severities are shown (default INFO and above).
+        let level = self.log_level;
+        let lines: Vec<_> = self
+            .log_buffer
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|line| line.level <= level)
+            .cloned()
+            .collect();
 
         Frame::default()
             .fill(p.field)
@@ -27,7 +38,6 @@ impl MplexerApp {
             .corner_radius(5)
             .inner_margin(Margin::symmetric(8, 6))
             .show(ui, |ui| {
-                let lines = self.log_buffer.lock().unwrap().clone();
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .stick_to_bottom(true)
@@ -42,6 +52,31 @@ impl MplexerApp {
                     });
             });
     }
+}
+
+/// Dropdown selecting the minimum severity shown in the console. Levels are
+/// ordered Error < Warn < Info < Debug, so a line is shown when its level is at
+/// or above the chosen threshold. Built from a plain button (matching CLEAR's
+/// height and alignment) plus a menu popup, so there's no combo scrollbar.
+fn level_filter(ui: &mut egui::Ui, level: &mut log::Level) {
+    let response = ui.button(RichText::new(format!("{level} \u{25BE}")).size(10.0));
+    egui::Popup::menu(&response)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClick)
+        .show(|ui| {
+            for option in [
+                log::Level::Error,
+                log::Level::Warn,
+                log::Level::Info,
+                log::Level::Debug,
+            ] {
+                if ui
+                    .selectable_label(*level == option, RichText::new(option.to_string()).size(10.0))
+                    .clicked()
+                {
+                    *level = option;
+                }
+            }
+        });
 }
 
 /// One monospace log line, level-colored, for the console.

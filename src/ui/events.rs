@@ -37,6 +37,7 @@ pub(super) fn merge_snapshots(existing: &mut Vec<MonitorState>, incoming: Vec<Mo
             m.current_input = snap.current_input;
             m.observed_inputs = snap.observed_inputs.clone();
             m.available = snap.available;
+            m.edid = snap.edid.clone();
         } else {
             existing.push(MonitorState {
                 id: snap.id.clone(),
@@ -46,6 +47,7 @@ pub(super) fn merge_snapshots(existing: &mut Vec<MonitorState>, incoming: Vec<Mo
                 observed_inputs: snap.observed_inputs.clone(),
                 available: snap.available,
                 pending: false,
+                edid: snap.edid.clone(),
             });
         }
     }
@@ -90,6 +92,7 @@ mod tests {
             observed_inputs: observed.iter().copied().map(InputSource).collect(),
             available: true,
             pending: true,
+            edid: Default::default(),
         }
     }
 
@@ -104,6 +107,7 @@ mod tests {
                 current_input: Some(InputSource(0x12)),
                 observed_inputs: vec![InputSource(0x11), InputSource(0x12)],
                 available: true,
+                edid: Default::default(),
             },
             MonitorSnapshot {
                 id: id("b"),
@@ -112,6 +116,7 @@ mod tests {
                 current_input: None,
                 observed_inputs: vec![],
                 available: true,
+                edid: Default::default(),
             },
         ];
 

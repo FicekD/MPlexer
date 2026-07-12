@@ -5,7 +5,7 @@ use std::sync::mpsc::Sender;
 use egui::{Align, Frame, Layout, Margin, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::config::Config;
-use crate::ddc::InputSource;
+use crate::ddc::{EdidInfo, InputSource};
 use crate::model::MonitorState;
 use crate::net::{NetCmd, NetHandle};
 use crate::worker::WorkerCmd;
@@ -14,7 +14,12 @@ use super::app::MplexerApp;
 use super::theme::Palette;
 use super::widgets::{self, CardStatus};
 
-const CARD_SIZE: Vec2 = Vec2::new(244.0, 230.0);
+const CARD_SIZE: Vec2 = Vec2::new(244.0, 252.0);
+// Fixed heights for the two variable sections so every tile is the same height
+// regardless of how much EDID a panel exposes or whether it's controllable.
+// Sized generously to fit their fullest content (3 metadata rows / the combo).
+const META_SLOT_H: f32 = 50.0;
+const CONTROL_SLOT_H: f32 = 28.0;
 
 impl MplexerApp {
     pub(super) fn central(&mut self, ui: &mut egui::Ui, p: &Palette) {
@@ -171,18 +176,28 @@ fn monitor_card(
                         .truncate(),
                 );
 
+                edid_details(ui, &m.edid, p);
+
                 ui.add_space(4.0);
                 ui.label(RichText::new("INPUT SOURCE").color(p.muted).size(9.0));
                 ui.add_space(2.0);
 
-                if !m.controllable {
-                    ui.label(RichText::new("NO CONTROL").color(p.blue).size(10.0)).on_hover_text(
-                        "This display doesn't answer DDC/CI, so its input can't be switched from software.",
-                    );
-                    return;
-                }
+                let width = ui.available_width();
+                let chosen = ui
+                    .allocate_ui(Vec2::new(width, CONTROL_SLOT_H), |ui| {
+                        ui.set_min_height(CONTROL_SLOT_H);
+                        if !m.controllable {
+                            ui.label(RichText::new("NO CONTROL").color(p.blue).size(10.0))
+                                .on_hover_text(
+                                    "This display doesn't answer DDC/CI, so its input can't be switched from software.",
+                                );
+                            return None;
+                        }
+                        input_selector(ui, m, config, p)
+                    })
+                    .inner;
 
-                if let Some(chosen) = input_selector(ui, m, config, p)
+                if let Some(chosen) = chosen
                     && Some(chosen) != m.current_input
                     && !m.pending
                 {
@@ -226,6 +241,66 @@ fn input_selector(
     selected.filter(|&inp| Some(inp) != current)
 }
 
+/// Serial number and the EDID metadata worth showing per tile: physical size,
+/// native resolution, manufacture date, and EDID version. Rendered into a
+/// fixed-height slot (top-aligned) so tiles stay the same height whether the
+/// panel exposes a full EDID or none at all.
+fn edid_details(ui: &mut egui::Ui, edid: &EdidInfo, p: &Palette) {
+    ui.add_space(4.0);
+    ui.allocate_ui(Vec2::new(ui.available_width(), META_SLOT_H), |ui| {
+        ui.set_min_height(META_SLOT_H);
+        ui.spacing_mut().item_spacing.y = 2.0;
+
+        if edid.is_empty() {
+            ui.label(RichText::new("NO EDID").color(p.muted).monospace().size(9.0))
+                .on_hover_text("This display didn't report EDID metadata.");
+            return;
+        }
+
+        if let Some(serial) = &edid.serial {
+            meta_row(ui, p, "SN", serial);
+        }
+
+        let mut panel = Vec::new();
+        if let Some(d) = edid.diagonal_inches() {
+            panel.push(format!("{d:.0}\""));
+        }
+        if let Some((w, h)) = edid.native {
+            panel.push(format!("{w}\u{00D7}{h}"));
+        }
+        if !panel.is_empty() {
+            meta_row(ui, p, "PANEL", &panel.join(" "));
+        }
+
+        let mut mfg = Vec::new();
+        if let Some(year) = edid.year {
+            mfg.push(match edid.week {
+                Some(w) => format!("W{w:02} {year}"),
+                None => year.to_string(),
+            });
+        }
+        if let Some((v, r)) = edid.edid_version {
+            mfg.push(format!("EDID {v}.{r}"));
+        }
+        if !mfg.is_empty() {
+            meta_row(ui, p, "MFG", &mfg.join(" "));
+        }
+    });
+}
+
+/// One `TAG  value` line of monitor metadata. Tag and value share a font size so
+/// their baselines line up; the value truncates and reveals in full on hover so
+/// long serials don't blow out the card width.
+fn meta_row(ui: &mut egui::Ui, p: &Palette, tag: &str, value: &str) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(tag).color(p.muted).monospace().size(9.0));
+        ui.add(
+            egui::Label::new(RichText::new(value).color(p.text).monospace().size(9.0)).truncate(),
+        )
+        .on_hover_text(value);
+    });
+}
+
 fn count_chip(ui: &mut egui::Ui, p: &Palette, color: egui::Color32, label: &str, n: usize) {
     widgets::led(ui, color);
     ui.label(RichText::new(label).color(p.muted).size(11.0));
@@ -249,4 +324,3 @@ fn short_label(input: InputSource, config: &Config) -> String {
         None => code,
     }
 }
-

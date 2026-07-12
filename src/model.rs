@@ -1,4 +1,4 @@
-use crate::ddc::{InputSource, StableId};
+use crate::ddc::{EdidInfo, InputSource, StableId};
 use crate::net::HostView;
 
 #[derive(Clone, Debug)]
@@ -10,6 +10,7 @@ pub struct MonitorState {
     pub observed_inputs: Vec<InputSource>,
     pub available: bool,
     pub pending: bool,
+    pub edid: EdidInfo,
 }
 
 #[derive(Default)]
