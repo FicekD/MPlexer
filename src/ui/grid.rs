@@ -6,7 +6,7 @@ use egui::{Align, Frame, Layout, Margin, Rect, RichText, Sense, Stroke, Vec2};
 
 use crate::config::Config;
 use crate::ddc::InputSource;
-use crate::model::{MonitorState, Owner};
+use crate::model::MonitorState;
 use crate::net::{NetCmd, NetHandle};
 use crate::worker::WorkerCmd;
 
@@ -77,28 +77,16 @@ impl MplexerApp {
             return;
         }
 
-        let peer_name = self.state.peer_name.clone();
         let config = &self.config;
         let cmd_tx = &self.cmd_tx;
         let net = &self.net;
-        let peer_online = self.state.peer_online;
 
         // Top-aligned wrap so every card's top edge lines up regardless of height.
         let layout = Layout::left_to_right(Align::Min).with_main_wrap(true);
         ui.with_layout(layout, |ui| {
             for (i, m) in self.state.monitors.iter_mut().enumerate() {
                 ui.allocate_ui(CARD_SIZE, |ui| {
-                    monitor_card(
-                        ui,
-                        i + 1,
-                        m,
-                        config,
-                        cmd_tx,
-                        net,
-                        peer_online,
-                        peer_name.as_deref(),
-                        p,
-                    );
+                    monitor_card(ui, i + 1, m, config, cmd_tx, net, p);
                 });
             }
         });
@@ -109,10 +97,10 @@ impl MplexerApp {
         let mut standby = 0;
         let mut error = 0;
         for m in &self.state.monitors {
-            match CardStatus::derive(m.available, m.owner, m.pending) {
+            match CardStatus::derive(m.available, m.controllable, m.pending) {
                 CardStatus::Active => active += 1,
-                CardStatus::Standby | CardStatus::Pending => standby += 1,
-                CardStatus::Error | CardStatus::Unknown => error += 1,
+                CardStatus::NoControl | CardStatus::Pending => standby += 1,
+                CardStatus::Offline => error += 1,
             }
         }
         let total = self.state.monitors.len();
@@ -142,7 +130,6 @@ impl MplexerApp {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn monitor_card(
     ui: &mut egui::Ui,
     index: usize,
@@ -150,11 +137,9 @@ fn monitor_card(
     config: &Config,
     cmd_tx: &Sender<WorkerCmd>,
     net: &NetHandle,
-    peer_online: bool,
-    peer_name: Option<&str>,
     p: &Palette,
 ) {
-    let status = CardStatus::derive(m.available, m.owner, m.pending);
+    let status = CardStatus::derive(m.available, m.controllable, m.pending);
     Frame::default()
         .fill(p.card)
         .stroke(Stroke::new(1.0, p.border))
@@ -185,75 +170,59 @@ fn monitor_card(
                     egui::Label::new(RichText::new(&m.name).color(p.text_strong).size(12.0))
                         .truncate(),
                 );
-                let owner_label = match m.owner {
-                    Owner::Me => format!("\u{25CF} {}", config.machine_name),
-                    Owner::Peer => format!("\u{25CF} {}", peer_name.unwrap_or("peer")),
-                    Owner::Unknown => "\u{25CB} unassigned".to_string(),
-                };
-                ui.add(egui::Label::new(RichText::new(owner_label).color(p.muted).size(10.0)).truncate());
 
                 ui.add_space(4.0);
                 ui.label(RichText::new("INPUT SOURCE").color(p.muted).size(9.0));
                 ui.add_space(2.0);
 
-                let route = route_for(m.owner, m.available, peer_online);
-                let enabled = route != Route::Disabled && !m.pending;
-                let current = m.current_input;
-                let mut chosen = None;
-
-                if m.valid_inputs.is_empty() {
-                    ui.label(RichText::new("NO INPUTS").color(p.muted).size(10.0));
-                } else {
-                    let mut selected = current;
-                    ui.add_enabled_ui(enabled, |ui| {
-                        egui::ComboBox::from_id_salt(&m.id)
-                            .width(ui.available_width() - 8.0)
-                            .selected_text(
-                                RichText::new(selected_input_label(current, config)).size(11.0),
-                            )
-                            .show_ui(ui, |ui| {
-                                for &inp in &m.valid_inputs {
-                                    ui.selectable_value(
-                                        &mut selected,
-                                        Some(inp),
-                                        short_label(inp, config),
-                                    );
-                                }
-                            });
-                    });
-                    if selected != current
-                        && let Some(inp) = selected
-                    {
-                        chosen = Some(inp);
-                    }
-                }
-
-                if route == Route::Disabled {
-                    ui.label(RichText::new("PEER OFFLINE").color(p.red).size(9.0)).on_hover_text(
-                        "This monitor is switched away and the peer is not connected.",
+                if !m.controllable {
+                    ui.label(RichText::new("NO CONTROL").color(p.blue).size(10.0)).on_hover_text(
+                        "This display doesn't answer DDC/CI, so its input can't be switched from software.",
                     );
+                    return;
                 }
 
-                if let Some(inp) = chosen
-                    && Some(inp) != current
+                if let Some(chosen) = input_selector(ui, m, config, p)
+                    && Some(chosen) != m.current_input
                     && !m.pending
                 {
-                    match route {
-                        Route::Local => {
-                            m.pending = true;
-                            cmd_tx
-                                .send(WorkerCmd::SetInput { id: m.id.clone(), input: inp })
-                                .ok();
-                        }
-                        Route::Peer => {
-                            m.pending = true;
-                            net.send(NetCmd::RequestSwitch { id: m.id.clone(), target: inp });
-                        }
-                        Route::Disabled => {}
-                    }
+                    m.pending = true;
+                    // Attempt locally and ask any peer cabled to this monitor to do
+                    // the same; whichever host is active on it makes the switch stick.
+                    cmd_tx.send(WorkerCmd::SetInput { id: m.id.clone(), input: chosen }).ok();
+                    net.send(NetCmd::RequestSwitch { id: m.id.clone(), target: chosen });
                 }
             });
         });
+}
+
+/// The per-monitor input dropdown. Returns the newly picked input, if any.
+fn input_selector(
+    ui: &mut egui::Ui,
+    m: &MonitorState,
+    config: &Config,
+    p: &Palette,
+) -> Option<InputSource> {
+    if m.observed_inputs.is_empty() {
+        ui.label(RichText::new("DETECTING\u{2026}").color(p.muted).size(10.0)).on_hover_text(
+            "No input seen yet. Switch this display once (its own button works) and it'll appear here.",
+        );
+        return None;
+    }
+
+    let current = m.current_input;
+    let mut selected = current;
+    ui.add_enabled_ui(!m.pending, |ui| {
+        egui::ComboBox::from_id_salt(&m.id)
+            .width(ui.available_width() - 8.0)
+            .selected_text(RichText::new(selected_input_label(current, config)).size(11.0))
+            .show_ui(ui, |ui| {
+                for &inp in &m.observed_inputs {
+                    ui.selectable_value(&mut selected, Some(inp), short_label(inp, config));
+                }
+            });
+    });
+    selected.filter(|&inp| Some(inp) != current)
 }
 
 fn count_chip(ui: &mut egui::Ui, p: &Palette, color: egui::Color32, label: &str, n: usize) {
@@ -270,42 +239,13 @@ fn selected_input_label(current: Option<InputSource>, config: &Config) -> String
     }
 }
 
-/// Compact input name for the input dropdown; honours custom labels.
+/// Input label for the dropdown: the raw hex code, unless the user gave it a
+/// custom name in `input_labels` (keyed by the `0x..` code).
 fn short_label(input: InputSource, config: &Config) -> String {
     let code = format!("0x{:02X}", input.0);
-    if let Some(custom) = config.input_labels.get(&code) {
-        return custom.to_uppercase();
-    }
-    match input.0 {
-        0x01 => "VGA".to_string(),
-        0x03 => "DVI-1".to_string(),
-        0x04 => "DVI-2".to_string(),
-        0x0F => "DP-1".to_string(),
-        0x10 => "DP-2".to_string(),
-        0x11 => "HDMI-1".to_string(),
-        0x12 => "HDMI-2".to_string(),
-        other => format!("0x{other:02X}"),
+    match config.input_labels.get(&code) {
+        Some(custom) => custom.to_uppercase(),
+        None => code,
     }
 }
 
-/// Where a dropdown change for a monitor is routed.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Route {
-    /// We can write it ourselves (phase-2 path).
-    Local,
-    /// Ask the peer, which currently owns it, to switch it.
-    Peer,
-    /// Nobody can act on it right now.
-    Disabled,
-}
-
-fn route_for(owner: Owner, available: bool, peer_online: bool) -> Route {
-    match owner {
-        Owner::Me => Route::Local,
-        Owner::Peer if peer_online => Route::Peer,
-        Owner::Peer => Route::Disabled,
-        Owner::Unknown if available => Route::Local,
-        Owner::Unknown if peer_online => Route::Peer,
-        Owner::Unknown => Route::Disabled,
-    }
-}

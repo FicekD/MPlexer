@@ -16,7 +16,7 @@ pub struct Config {
     #[serde(default = "default_comms_port")]
     pub comms_port: u16,
     #[serde(default)]
-    pub my_inputs: HashMap<StableId, InputSource>,
+    pub observed_inputs: HashMap<StableId, Vec<InputSource>>,
     #[serde(default = "default_dark")]
     pub dark_theme: bool,
     #[serde(default = "default_ui_scale")]
@@ -30,7 +30,7 @@ impl Default for Config {
             input_labels: HashMap::new(),
             machine_id: Uuid::new_v4(),
             comms_port: default_comms_port(),
-            my_inputs: HashMap::new(),
+            observed_inputs: HashMap::new(),
             dark_theme: default_dark(),
             ui_scale: default_ui_scale(),
         }

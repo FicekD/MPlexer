@@ -1,50 +1,44 @@
 use egui::{Color32, Pos2, Rect, Stroke, StrokeKind, Vec2};
 
 use super::theme::Palette;
-use crate::model::Owner;
 
-/// Coarse per-monitor state shown as the card's status badge, derived from the
-/// real availability/owner/pending flags.
+/// Coarse per-monitor state shown as the card's status badge.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CardStatus {
     Active,
-    Standby,
-    Error,
+    NoControl,
     Pending,
-    Unknown,
+    Offline,
 }
 
 impl CardStatus {
-    pub fn derive(available: bool, owner: Owner, pending: bool) -> Self {
+    pub fn derive(available: bool, controllable: bool, pending: bool) -> Self {
         if pending {
-            return CardStatus::Pending;
-        }
-        match owner {
-            Owner::Me if available => CardStatus::Active,
-            Owner::Me => CardStatus::Error,
-            Owner::Peer => CardStatus::Standby,
-            Owner::Unknown if available => CardStatus::Active,
-            Owner::Unknown => CardStatus::Unknown,
+            CardStatus::Pending
+        } else if !available {
+            CardStatus::Offline
+        } else if !controllable {
+            CardStatus::NoControl
+        } else {
+            CardStatus::Active
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
             CardStatus::Active => "ACTIVE",
-            CardStatus::Standby => "STANDBY",
-            CardStatus::Error => "ERROR",
+            CardStatus::NoControl => "NO CONTROL",
             CardStatus::Pending => "PENDING",
-            CardStatus::Unknown => "UNKNOWN",
+            CardStatus::Offline => "OFFLINE",
         }
     }
 
     pub fn color(self, p: &Palette) -> Color32 {
         match self {
             CardStatus::Active => p.green,
-            CardStatus::Standby => p.blue,
-            CardStatus::Error => p.red,
+            CardStatus::NoControl => p.blue,
             CardStatus::Pending => p.accent,
-            CardStatus::Unknown => p.muted,
+            CardStatus::Offline => p.red,
         }
     }
 }

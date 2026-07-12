@@ -6,9 +6,9 @@ use crate::ddc::{InputSource, StableId};
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 pub struct MonitorInfo {
     pub id: StableId,
-    pub my_input: Option<InputSource>,
+    pub controllable: bool,
     pub current_input: Option<InputSource>,
-    pub valid_inputs: Vec<InputSource>,
+    pub observed_inputs: Vec<InputSource>,
     pub label: String,
 }
 
@@ -22,12 +22,6 @@ pub enum Message {
     },
     State { monitors: Vec<MonitorInfo> },
     SwitchRequest { id: StableId, target: InputSource },
-    SwitchResult {
-        id: StableId,
-        ok: bool,
-        current: Option<InputSource>,
-        error: Option<String>,
-    },
     Heartbeat,
 }
 
@@ -42,9 +36,9 @@ mod tests {
     fn sample_monitors() -> Vec<MonitorInfo> {
         vec![MonitorInfo {
             id: id("a"),
-            my_input: Some(InputSource(0x11)),
+            controllable: true,
             current_input: Some(InputSource(0x12)),
-            valid_inputs: vec![InputSource(0x11), InputSource(0x12)],
+            observed_inputs: vec![InputSource(0x11), InputSource(0x12)],
             label: "Monitor A".into(),
         }]
     }
@@ -69,18 +63,6 @@ mod tests {
         round_trip(&Message::SwitchRequest {
             id: id("a"),
             target: InputSource(0x11),
-        });
-        round_trip(&Message::SwitchResult {
-            id: id("a"),
-            ok: true,
-            current: Some(InputSource(0x11)),
-            error: None,
-        });
-        round_trip(&Message::SwitchResult {
-            id: id("a"),
-            ok: false,
-            current: None,
-            error: Some("not owner".into()),
         });
         round_trip(&Message::Heartbeat);
     }

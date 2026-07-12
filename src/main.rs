@@ -91,7 +91,7 @@ fn run_gui(log_buffer: logging::LogBuffer) -> Result<()> {
         "MPlexer",
         options,
         Box::new(move |cc| {
-            worker::spawn(cmd_rx, evt_tx, cc.egui_ctx.clone());
+            worker::spawn(cmd_rx, evt_tx, cc.egui_ctx.clone(), cfg.observed_inputs.clone());
             let net = net::spawn(cfg.clone(), net_evt_tx, cc.egui_ctx.clone());
             Ok(Box::new(ui::MplexerApp::new(
                 cfg, cmd_tx, evt_rx, net, net_evt_rx, log_buffer,
@@ -102,19 +102,18 @@ fn run_gui(log_buffer: logging::LogBuffer) -> Result<()> {
 }
 
 fn list() -> Result<()> {
+    let cfg = config::Config::load().unwrap_or_default();
     for (index, monitor) in ddc::enumerate().iter().enumerate() {
+        let observed = cfg.observed_inputs.get(&monitor.id).map(Vec::as_slice).unwrap_or(&[]);
+        let controllable = monitor.controllable || !observed.is_empty();
         println!(
-            "#{}  id={}  name=\"{}\"  current={}  valid=[{}]",
+            "#{}  id={}  name=\"{}\"  controllable={}  current={}  observed=[{}]",
             index,
             monitor.id.as_str(),
             monitor.name,
+            controllable,
             format_input(monitor.current_input),
-            monitor
-                .valid_inputs
-                .iter()
-                .map(|i| i.label())
-                .collect::<Vec<_>>()
-                .join(", "),
+            observed.iter().map(|i| i.label()).collect::<Vec<_>>().join(", "),
         );
     }
     Ok(())
@@ -144,8 +143,7 @@ fn set(id: &str, hex_code: &str, yes: bool) -> Result<()> {
 
     if !yes {
         println!(
-            "WOULD write VCP 0x60 = 0x{:02X} ({}) on \"{}\" (id={}). This can blank the screen; re-run with --yes to actually switch.",
-            input.0,
+            "WOULD write VCP 0x60 = {} on \"{}\" (id={}). This can blank the screen; re-run with --yes to actually switch.",
             input.label(),
             monitor.name,
             monitor.id.as_str(),
@@ -154,11 +152,10 @@ fn set(id: &str, hex_code: &str, yes: bool) -> Result<()> {
     }
 
     println!(
-        "WARNING: switching \"{}\" (id={}) to {} (0x{:02X}) now.",
+        "WARNING: switching \"{}\" (id={}) to {} now.",
         monitor.name,
         monitor.id.as_str(),
         input.label(),
-        input.0,
     );
     monitor.write_input(input)?;
     println!("Done.");
@@ -180,7 +177,7 @@ fn parse_hex_code(s: &str) -> Result<u8> {
 
 fn format_input(input: Option<InputSource>) -> String {
     match input {
-        Some(i) => format!("{}(0x{:02X})", i.label(), i.0),
+        Some(i) => i.label(),
         None => "unknown".to_string(),
     }
 }

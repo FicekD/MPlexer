@@ -2,7 +2,7 @@ mod discovery;
 mod link;
 pub mod proto;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::net::{SocketAddr, TcpStream};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,6 @@ use uuid::Uuid;
 
 use crate::config::Config;
 use crate::ddc::{InputSource, StableId};
-use crate::model::Owner;
 use crate::worker::MonitorSnapshot;
 use link::LocalView;
 pub use link::TCP_PORT;
@@ -20,16 +19,11 @@ use proto::{Message, MonitorInfo};
 
 const TICK: Duration = Duration::from_secs(1);
 const DIAL_COOLDOWN: Duration = Duration::from_secs(4);
-const SWITCH_TIMEOUT: Duration = Duration::from_secs(8);
 const HOST_OFFLINE_AFTER: Duration = Duration::from_secs(7);
 const HOST_DROP_AFTER: Duration = Duration::from_secs(30);
 
 pub enum NetCmd {
     LocalState(Vec<MonitorSnapshot>),
-    LocalSetResult {
-        id: StableId,
-        result: Result<InputSource, String>,
-    },
     RequestSwitch { id: StableId, target: InputSource },
     SelectPeer(Option<Uuid>),
 }
@@ -56,15 +50,9 @@ pub enum NetEvt {
     },
     PeerOffline,
     Hosts(Vec<HostView>),
-    Owners(HashMap<StableId, Owner>),
     ExecuteSwitch {
         id: StableId,
         target: InputSource,
-    },
-    SwitchResult {
-        id: StableId,
-        ok: bool,
-        error: Option<String>,
     },
     Status(String),
 }
@@ -129,8 +117,6 @@ struct Net {
     peer: Option<PeerConn>,
     peer_monitors: Vec<MonitorInfo>,
     epoch_counter: u64,
-    pending_out: HashMap<StableId, Instant>,
-    pending_in: HashSet<StableId>,
     last_dial: Option<Instant>,
     hosts: HashMap<Uuid, HostRecord>,
     last_hosts: Vec<HostView>,
@@ -169,8 +155,6 @@ fn run(
         peer: None,
         peer_monitors: Vec::new(),
         epoch_counter: 0,
-        pending_out: HashMap::new(),
-        pending_in: HashSet::new(),
         last_dial: None,
         hosts: HashMap::new(),
         last_hosts: Vec::new(),
@@ -217,38 +201,15 @@ impl Net {
         match cmd {
             NetCmd::LocalState(snaps) => {
                 self.local_snaps = snaps;
-                self.learn_my_inputs();
                 let infos = self.build_my_infos();
                 *self.local.lock().unwrap() = infos.clone();
-                self.push_owners();
                 if self.connected() {
                     self.send_to_peer(Message::State { monitors: infos });
                 }
             }
-            NetCmd::LocalSetResult { id, result } => {
-                if self.pending_in.remove(&id) {
-                    let (ok, current, error) = match result {
-                        Ok(input) => (true, Some(input), None),
-                        Err(e) => (false, None, Some(e)),
-                    };
-                    self.send_to_peer(Message::SwitchResult {
-                        id,
-                        ok,
-                        current,
-                        error,
-                    });
-                }
-            }
             NetCmd::RequestSwitch { id, target } => {
                 if self.connected() {
-                    self.pending_out.insert(id.clone(), Instant::now());
                     self.send_to_peer(Message::SwitchRequest { id, target });
-                } else {
-                    self.emit(NetEvt::SwitchResult {
-                        id,
-                        ok: false,
-                        error: Some("peer offline".into()),
-                    });
                 }
             }
             NetCmd::SelectPeer(sel) => self.select_peer(sel),
@@ -280,7 +241,6 @@ impl Net {
             self.last_dial = None;
             self.emit(NetEvt::Status("disconnected".into()));
             self.emit(NetEvt::PeerOffline);
-            self.push_owners();
         }
     }
 
@@ -343,7 +303,6 @@ impl Net {
         self.emit(NetEvt::Status(format!("connected to {peer_name}")));
         self.emit(NetEvt::PeerOnline { name: peer_name });
         self.emit_hosts();
-        self.push_owners();
         let infos = self.build_my_infos();
         self.send_to_peer(Message::State { monitors: infos });
     }
@@ -368,25 +327,13 @@ impl Net {
         match msg {
             Message::Hello { monitors, .. } | Message::State { monitors } => {
                 self.peer_monitors = monitors;
-                self.push_owners();
             }
             Message::SwitchRequest { id, target } => {
-                if self.owner_of(&id) == Owner::Me {
+                // Execute only if we're cabled to this monitor and can control it.
+                if self.local_snaps.iter().any(|s| s.id == id && s.controllable) {
                     log::info!("peer requested switch of {id} to 0x{:02X}", target.0);
-                    self.pending_in.insert(id.clone());
                     self.emit(NetEvt::ExecuteSwitch { id, target });
-                } else {
-                    self.send_to_peer(Message::SwitchResult {
-                        id,
-                        ok: false,
-                        current: None,
-                        error: Some("not owner".into()),
-                    });
                 }
-            }
-            Message::SwitchResult { id, ok, error, .. } => {
-                self.pending_out.remove(&id);
-                self.emit(NetEvt::SwitchResult { id, ok, error });
             }
             Message::Heartbeat => {}
         }
@@ -402,26 +349,10 @@ impl Net {
         self.last_dial = None;
         self.emit(NetEvt::Status("peer disconnected".into()));
         self.emit(NetEvt::PeerOffline);
-        self.push_owners();
         self.emit_hosts();
     }
 
     fn tick(&mut self) {
-        let timed_out: Vec<StableId> = self
-            .pending_out
-            .iter()
-            .filter(|(_, t)| t.elapsed() > SWITCH_TIMEOUT)
-            .map(|(id, _)| id.clone())
-            .collect();
-        for id in timed_out {
-            self.pending_out.remove(&id);
-            self.emit(NetEvt::SwitchResult {
-                id,
-                ok: false,
-                error: Some("peer did not respond".into()),
-            });
-        }
-
         if !self.connected()
             && let Some(id) = self.selected_peer
             && let Some(sock) = self.hosts.get(&id).and_then(|h| h.sock)
@@ -449,63 +380,21 @@ impl Net {
         );
     }
 
-    fn learn_my_inputs(&mut self) {
-        let mut changed = false;
-        for snap in &self.local_snaps {
-            if snap.available
-                && let Some(current) = snap.current_input
-                && !self.config.my_inputs.contains_key(&snap.id)
-            {
-                self.config.my_inputs.insert(snap.id.clone(), current);
-                changed = true;
-            }
-        }
-        if changed {
-            let learned = self.config.my_inputs.clone();
-            if let Err(e) = Config::persist_with(|c| c.my_inputs = learned) {
-                log::warn!("failed to persist learned inputs: {e:#}");
-            }
-        }
-    }
-
     fn build_my_infos(&self) -> Vec<MonitorInfo> {
         self.local_snaps
             .iter()
             .map(|snap| MonitorInfo {
                 id: snap.id.clone(),
-                my_input: self.config.my_inputs.get(&snap.id).copied(),
+                controllable: snap.controllable,
                 current_input: if snap.available {
                     snap.current_input
                 } else {
                     None
                 },
-                valid_inputs: snap.valid_inputs.clone(),
+                observed_inputs: snap.observed_inputs.clone(),
                 label: snap.name.clone(),
             })
             .collect()
-    }
-
-    fn owner_of(&self, id: &StableId) -> Owner {
-        let local = self.local_snaps.iter().find(|s| s.id == *id);
-        let peer = if self.connected() {
-            self.peer_monitors.iter().find(|m| m.id == *id)
-        } else {
-            None
-        };
-        compute_owner(
-            self.config.my_inputs.get(id).copied(),
-            local.map(|s| (s.available, s.current_input)),
-            peer,
-        )
-    }
-
-    fn push_owners(&self) {
-        let owners = self
-            .local_snaps
-            .iter()
-            .map(|s| (s.id.clone(), self.owner_of(&s.id)))
-            .collect();
-        self.emit(NetEvt::Owners(owners));
     }
 
     fn emit_hosts(&mut self) {
@@ -540,110 +429,51 @@ impl Net {
     }
 }
 
-fn compute_owner(
-    my_input: Option<InputSource>,
-    local: Option<(bool, Option<InputSource>)>,
-    peer: Option<&MonitorInfo>,
-) -> Owner {
-    if let (Some(mine), Some((true, current))) = (my_input, local)
-        && current == Some(mine)
-    {
-        return Owner::Me;
-    }
-    if let Some(peer) = peer
-        && peer.current_input.is_some()
-        && peer.current_input == peer.my_input
-    {
-        return Owner::Peer;
-    }
-    // A display we can see but can't read the input on (e.g. a TV that doesn't
-    // report VCP 0x60) is assumed ours, since the peer above isn't showing it.
-    if let Some((true, None)) = local {
-        return Owner::Me;
-    }
-    Owner::Unknown
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker::MonitorSnapshot;
 
     fn id(model: &str) -> StableId {
         crate::ddc::identity::stable_id(Some("acme"), Some(model), None, Some("serial"), None, 0)
     }
 
-    fn peer_info(my: u8, current: Option<u8>) -> MonitorInfo {
-        MonitorInfo {
+    fn snap(controllable: bool) -> MonitorSnapshot {
+        MonitorSnapshot {
             id: id("a"),
-            my_input: Some(InputSource(my)),
-            current_input: current.map(InputSource),
-            valid_inputs: vec![],
-            label: "A".into(),
+            name: "A".into(),
+            controllable,
+            current_input: Some(InputSource(0x12)),
+            observed_inputs: vec![InputSource(0x12), InputSource(0x0F)],
+            available: true,
         }
     }
 
     #[test]
-    fn i_own_when_i_read_my_input() {
-        let owner = compute_owner(
-            Some(InputSource(0x11)),
-            Some((true, Some(InputSource(0x11)))),
-            Some(&peer_info(0x12, None)),
-        );
-        assert_eq!(owner, Owner::Me);
+    fn build_my_infos_carries_controllable_and_observed() {
+        let mut net = test_net();
+        net.local_snaps = vec![snap(true)];
+        let infos = net.build_my_infos();
+        assert_eq!(infos.len(), 1);
+        assert!(infos[0].controllable);
+        assert_eq!(infos[0].observed_inputs, vec![InputSource(0x12), InputSource(0x0F)]);
     }
 
-    #[test]
-    fn peer_owns_when_switched_away_and_peer_reads_its_input() {
-        let owner = compute_owner(
-            Some(InputSource(0x11)),
-            Some((false, None)),
-            Some(&peer_info(0x12, Some(0x12))),
-        );
-        assert_eq!(owner, Owner::Peer);
-    }
-
-    #[test]
-    fn unknown_when_neither_side_reads_its_input() {
-        let owner = compute_owner(
-            Some(InputSource(0x11)),
-            Some((false, None)),
-            Some(&peer_info(0x12, None)),
-        );
-        assert_eq!(owner, Owner::Unknown);
-    }
-
-    #[test]
-    fn unknown_when_peer_offline_and_i_am_switched_away() {
-        let owner = compute_owner(Some(InputSource(0x11)), Some((false, None)), None);
-        assert_eq!(owner, Owner::Unknown);
-    }
-
-    #[test]
-    fn i_do_not_own_a_third_input_i_can_read() {
-        let owner = compute_owner(
-            Some(InputSource(0x11)),
-            Some((true, Some(InputSource(0x0F)))),
-            None,
-        );
-        assert_eq!(owner, Owner::Unknown);
-    }
-
-    #[test]
-    fn unknown_when_my_input_not_yet_learned() {
-        let owner = compute_owner(None, Some((true, Some(InputSource(0x11)))), None);
-        assert_eq!(owner, Owner::Unknown);
-    }
-
-    #[test]
-    fn present_unreadable_display_is_mine_when_peer_not_showing_it() {
-        // A TV we can see but can't read the input on, with no peer claim.
-        let owner = compute_owner(None, Some((true, None)), None);
-        assert_eq!(owner, Owner::Me);
-    }
-
-    #[test]
-    fn present_unreadable_display_yields_to_peer_that_shows_it() {
-        let owner = compute_owner(None, Some((true, None)), Some(&peer_info(0x12, Some(0x12))));
-        assert_eq!(owner, Owner::Peer);
+    fn test_net() -> Net {
+        Net {
+            config: Config::default(),
+            inbound: mpsc::channel().0,
+            evt_tx: mpsc::channel().0,
+            ctx: egui::Context::default(),
+            local: Arc::new(Mutex::new(Vec::new())),
+            local_snaps: Vec::new(),
+            peer: None,
+            peer_monitors: Vec::new(),
+            epoch_counter: 0,
+            last_dial: None,
+            hosts: HashMap::new(),
+            last_hosts: Vec::new(),
+            selected_peer: None,
+        }
     }
 }

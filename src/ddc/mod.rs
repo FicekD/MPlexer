@@ -5,17 +5,22 @@ pub use identity::StableId;
 pub use inputs::InputSource;
 
 use std::collections::HashSet;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use ddc_hi::{Ddc, Display};
 
 const VCP_INPUT_SOURCE: u8 = 0x60;
 
+const READ_RETRIES: usize = 3;
+const RETRY_DELAY: Duration = Duration::from_millis(50);
+
 pub struct Monitor {
     pub id: StableId,
     pub name: String,
+    pub controllable: bool,
     pub current_input: Option<InputSource>,
-    pub valid_inputs: Vec<InputSource>,
+    pub caps_inputs: Vec<InputSource>,
     handle: Display,
 }
 
@@ -24,7 +29,7 @@ struct Candidate {
     has_edid: bool,
     model_key: Option<String>,
     current_input: Option<InputSource>,
-    valid_inputs: Vec<InputSource>,
+    caps_inputs: Vec<InputSource>,
 }
 
 pub fn enumerate() -> Vec<Monitor> {
@@ -42,26 +47,6 @@ pub fn enumerate() -> Vec<Monitor> {
                 .clone()
                 .unwrap_or_else(|| format!("Monitor {index}"));
 
-            let current_input = match display.handle.get_vcp_feature(VCP_INPUT_SOURCE) {
-                Ok(v) => Some(InputSource(v.value() as u8)),
-                Err(e) => {
-                    log::warn!("failed to read VCP 0x60 on {log_name}: {e:#}");
-                    None
-                }
-            };
-
-            let caps_string = match display.handle.capabilities_string() {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                Err(e) => {
-                    log::warn!("failed to read capabilities string on {log_name}: {e:#}");
-                    String::new()
-                }
-            };
-            let mut valid_inputs = inputs::parse_input_list(&caps_string);
-            if valid_inputs.is_empty() {
-                valid_inputs.extend(current_input);
-            }
-
             let has_edid = display.info.edid_data.is_some();
             let model_key = display
                 .info
@@ -70,12 +55,24 @@ pub fn enumerate() -> Vec<Monitor> {
                 .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty());
 
+            let retries = if has_edid || model_key.is_some() { READ_RETRIES } else { 1 };
+            let current_input = read_current_input(&mut display, &log_name, retries);
+
+            let caps_string = match display.handle.capabilities_string() {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(e) => {
+                    log::warn!("failed to read capabilities string on {log_name}: {e:#}");
+                    String::new()
+                }
+            };
+            let caps_inputs = inputs::parse_input_list(&caps_string);
+
             Candidate {
                 display,
                 has_edid,
                 model_key,
                 current_input,
-                valid_inputs,
+                caps_inputs,
             }
         })
         .collect();
@@ -83,7 +80,7 @@ pub fn enumerate() -> Vec<Monitor> {
     drop_backend_duplicates(&mut candidates);
 
     candidates.retain(|c| {
-        let communicating = c.current_input.is_some() || !c.valid_inputs.is_empty();
+        let communicating = c.current_input.is_some() || !c.caps_inputs.is_empty();
         let keep = !is_ghost(c.has_edid, c.model_key.is_some(), communicating);
         if !keep {
             log::debug!("dropping anonymous non-responsive display handle");
@@ -109,15 +106,31 @@ pub fn enumerate() -> Vec<Monitor> {
                 .clone()
                 .unwrap_or_else(|| format!("Monitor {index}"));
 
+            let controllable = c.current_input.is_some() || !c.caps_inputs.is_empty();
+
             Monitor {
                 id,
                 name,
+                controllable,
                 current_input: c.current_input,
-                valid_inputs: c.valid_inputs,
+                caps_inputs: c.caps_inputs,
                 handle: c.display,
             }
         })
         .collect()
+}
+
+fn read_current_input(display: &mut Display, log_name: &str, retries: usize) -> Option<InputSource> {
+    for attempt in 1..=retries {
+        match display.handle.get_vcp_feature(VCP_INPUT_SOURCE) {
+            Ok(v) => return Some(InputSource(v.value() as u8)),
+            Err(e) if attempt == retries => {
+                log::warn!("failed to read VCP 0x60 on {log_name} after {attempt} attempt(s): {e:#}");
+            }
+            Err(_) => std::thread::sleep(RETRY_DELAY),
+        }
+    }
+    None
 }
 
 fn drop_backend_duplicates(candidates: &mut Vec<Candidate>) {
@@ -129,8 +142,6 @@ fn drop_backend_duplicates(candidates: &mut Vec<Candidate>) {
     candidates.retain(|_| !is_duplicate.next().unwrap());
 }
 
-/// A handle with no EDID, no model name, and no DDC response is a backend
-/// phantom rather than a real display.
 fn is_ghost(has_edid: bool, has_model: bool, communicating: bool) -> bool {
     !has_edid && !has_model && !communicating
 }

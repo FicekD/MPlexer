@@ -1,21 +1,14 @@
 use crate::ddc::{InputSource, StableId};
 use crate::net::HostView;
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Owner {
-    Me,
-    Peer,
-    Unknown,
-}
-
 #[derive(Clone, Debug)]
 pub struct MonitorState {
     pub id: StableId,
     pub name: String,
+    pub controllable: bool,
     pub current_input: Option<InputSource>,
-    pub valid_inputs: Vec<InputSource>,
+    pub observed_inputs: Vec<InputSource>,
     pub available: bool,
-    pub owner: Owner,
     pub pending: bool,
 }
 

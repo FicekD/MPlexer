@@ -3,17 +3,7 @@ pub struct InputSource(pub u8);
 
 impl InputSource {
     pub fn label(self) -> String {
-        match self.0 {
-            0x01 => "VGA-1".to_string(),
-            0x03 => "DVI-1".to_string(),
-            0x04 => "DVI-2".to_string(),
-            0x0C => "Component-1".to_string(),
-            0x0F => "DisplayPort-1".to_string(),
-            0x10 => "DisplayPort-2".to_string(),
-            0x11 => "HDMI-1".to_string(),
-            0x12 => "HDMI-2".to_string(),
-            other => format!("Input 0x{other:02X}"),
-        }
+        format!("0x{:02X}", self.0)
     }
 }
 
@@ -95,15 +85,9 @@ mod tests {
     }
 
     #[test]
-    fn labels_match_mccs_table() {
-        assert_eq!(InputSource(0x01).label(), "VGA-1");
-        assert_eq!(InputSource(0x03).label(), "DVI-1");
-        assert_eq!(InputSource(0x04).label(), "DVI-2");
-        assert_eq!(InputSource(0x0C).label(), "Component-1");
-        assert_eq!(InputSource(0x0F).label(), "DisplayPort-1");
-        assert_eq!(InputSource(0x10).label(), "DisplayPort-2");
-        assert_eq!(InputSource(0x11).label(), "HDMI-1");
-        assert_eq!(InputSource(0x12).label(), "HDMI-2");
-        assert_eq!(InputSource(0xAB).label(), "Input 0xAB");
+    fn label_is_the_raw_hex_code() {
+        assert_eq!(InputSource(0x0F).label(), "0x0F");
+        assert_eq!(InputSource(0x12).label(), "0x12");
+        assert_eq!(InputSource(0xAB).label(), "0xAB");
     }
 }

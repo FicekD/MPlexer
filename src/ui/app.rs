@@ -80,10 +80,6 @@ impl eframe::App for MplexerApp {
                     merge_snapshots(&mut self.state.monitors, list);
                 }
                 WorkerEvt::SetResult { id, result } => {
-                    self.net.send(NetCmd::LocalSetResult {
-                        id: id.clone(),
-                        result: result.clone(),
-                    });
                     apply_set_result(&mut self.state, id, result);
                 }
             }
