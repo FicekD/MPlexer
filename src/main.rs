@@ -63,13 +63,20 @@ fn main() -> Result<()> {
 }
 
 fn run_gui(log_buffer: logging::LogBuffer) -> Result<()> {
-    let cfg = config::Config::load().unwrap_or_else(|e| {
-        log::warn!("failed to load config, using defaults: {e:#}");
-        config::Config::default()
-    });
-    if let Err(e) = cfg.save() {
-        log::warn!("failed to write config: {e:#}");
-    }
+    let cfg = match config::Config::load() {
+        Ok(cfg) => {
+            if let Err(e) = cfg.save() {
+                log::warn!("failed to write config: {e:#}");
+            }
+            cfg
+        }
+        Err(e) => {
+            log::error!(
+                "config is unreadable, running with defaults and leaving the file untouched: {e:#}"
+            );
+            config::Config::default()
+        }
+    };
     log::info!(
         "starting GUI as '{}' on comms port {}",
         cfg.machine_name,

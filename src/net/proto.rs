@@ -22,6 +22,8 @@ pub enum Message {
     },
     State { monitors: Vec<MonitorInfo> },
     SwitchRequest { id: StableId, target: InputSource },
+    /// The sender dropped the link on purpose and should not be redialed.
+    Unlink,
     Heartbeat,
 }
 
@@ -30,7 +32,7 @@ mod tests {
     use super::*;
 
     fn id(model: &str) -> StableId {
-        crate::ddc::identity::stable_id(Some("acme"), Some(model), None, Some("serial"), None, 0)
+        crate::ddc::identity::stable_id(Some("acme"), Some(model), None, Some("serial"), None)
     }
 
     fn sample_monitors() -> Vec<MonitorInfo> {
@@ -64,6 +66,7 @@ mod tests {
             id: id("a"),
             target: InputSource(0x11),
         });
+        round_trip(&Message::Unlink);
         round_trip(&Message::Heartbeat);
     }
 }

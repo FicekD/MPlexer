@@ -10,12 +10,15 @@ use std::collections::HashSet;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use ddc_hi::{Ddc, Display};
+use ddc_hi::{Ddc, Display, DisplayInfo};
 
 const VCP_INPUT_SOURCE: u8 = 0x60;
 
 const READ_RETRIES: usize = 3;
 const RETRY_DELAY: Duration = Duration::from_millis(50);
+// Consecutive failed reads after which the last known input is no longer trusted.
+// Many panels stop answering DDC on a cable once they show another input.
+const STALE_AFTER_MISSES: u8 = 2;
 
 pub struct Monitor {
     pub id: StableId,
@@ -25,6 +28,7 @@ pub struct Monitor {
     pub caps_inputs: Vec<InputSource>,
     pub edid: EdidInfo,
     handle: Display,
+    misses: u8,
 }
 
 struct Candidate {
@@ -47,9 +51,26 @@ pub fn enumerate() -> Vec<Monitor> {
             let backend = display.info.backend;
             log::debug!("[{index}] probing via {backend} (id={})", display.info.id);
 
-            match display.update_capabilities() {
-                Ok(()) => log::debug!("[{index}] {backend}: capabilities updated"),
-                Err(e) => log::warn!("[{index}] {backend}: failed to read capabilities: {e:#}"),
+            // Read once and parse locally; `update_capabilities` would fetch the
+            // whole string over DDC a second time.
+            let caps_string = match display.handle.capabilities_string() {
+                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+                Err(e) => {
+                    log::warn!("[{index}] {backend}: failed to read capabilities string: {e:#}");
+                    String::new()
+                }
+            };
+            if !caps_string.is_empty() {
+                match mccs_caps::parse_capabilities(&caps_string) {
+                    Ok(caps) => {
+                        let from_caps =
+                            DisplayInfo::from_capabilities(backend, display.info.id.clone(), &caps);
+                        display.info.update_from(&from_caps);
+                    }
+                    Err(e) => {
+                        log::debug!("[{index}] {backend}: capabilities string did not parse: {e:#}")
+                    }
+                }
             }
 
             let info = &display.info;
@@ -81,13 +102,6 @@ pub fn enumerate() -> Vec<Monitor> {
                 None => log::debug!("[{index}] {log_name}: input source unreadable over DDC/CI"),
             }
 
-            let caps_string = match display.handle.capabilities_string() {
-                Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-                Err(e) => {
-                    log::warn!("[{index}] {log_name}: failed to read capabilities string: {e:#}");
-                    String::new()
-                }
-            };
             let caps_inputs = inputs::parse_input_list(&caps_string);
             log::debug!(
                 "[{index}] {log_name}: capabilities string {} bytes, advertises {} input(s): [{}]",
@@ -121,19 +135,27 @@ pub fn enumerate() -> Vec<Monitor> {
         keep
     });
 
-    let monitors: Vec<Monitor> = candidates
-        .into_iter()
-        .enumerate()
-        .map(|(index, c)| {
+    let mut ids: Vec<StableId> = candidates
+        .iter()
+        .map(|c| {
             let info = &c.display.info;
-            let id = identity::stable_id(
+            identity::stable_id(
                 info.manufacturer_id.as_deref(),
                 info.model_name.as_deref(),
                 info.model_id,
                 info.serial_number.as_deref(),
                 info.serial,
-                index,
-            );
+            )
+        })
+        .collect();
+    identity::disambiguate(&mut ids);
+
+    let monitors: Vec<Monitor> = candidates
+        .into_iter()
+        .zip(ids)
+        .enumerate()
+        .map(|(index, (c, id))| {
+            let info = &c.display.info;
             let name = info
                 .model_name
                 .clone()
@@ -162,6 +184,7 @@ pub fn enumerate() -> Vec<Monitor> {
                 caps_inputs: c.caps_inputs,
                 edid,
                 handle: c.display,
+                misses: 0,
             }
         })
         .collect();
@@ -235,14 +258,21 @@ fn duplicate_flags(entries: &[(bool, Option<&str>)]) -> Vec<bool> {
 
 impl Monitor {
     pub fn read_input(&mut self) -> Result<InputSource> {
-        let value = self
-            .handle
-            .handle
-            .get_vcp_feature(VCP_INPUT_SOURCE)
-            .with_context(|| format!("VCP 0x60 on {}", self.name))?;
-        let input = InputSource(value.value() as u8);
-        self.current_input = Some(input);
-        Ok(input)
+        match self.handle.handle.get_vcp_feature(VCP_INPUT_SOURCE) {
+            Ok(value) => {
+                let input = InputSource(value.value() as u8);
+                self.misses = 0;
+                self.current_input = Some(input);
+                Ok(input)
+            }
+            Err(e) => {
+                self.misses = self.misses.saturating_add(1);
+                if self.misses >= STALE_AFTER_MISSES {
+                    self.current_input = None;
+                }
+                Err(e).with_context(|| format!("VCP 0x60 on {}", self.name))
+            }
+        }
     }
 
     pub fn write_input(&mut self, input: InputSource) -> Result<()> {
@@ -250,6 +280,7 @@ impl Monitor {
             .handle
             .set_vcp_feature(VCP_INPUT_SOURCE, input.0 as u16)
             .with_context(|| format!("VCP 0x60 on {}", self.name))?;
+        self.misses = 0;
         self.current_input = Some(input);
         Ok(())
     }

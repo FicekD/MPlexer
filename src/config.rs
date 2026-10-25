@@ -1,5 +1,7 @@
 use std::collections::HashMap;
+use std::io::ErrorKind;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use anyhow::{Context, Result};
 use uuid::Uuid;
@@ -56,9 +58,15 @@ impl Config {
         Ok(dirs.config_dir().join("config.json"))
     }
 
+    /// A missing file yields defaults; an unreadable or malformed one is an
+    /// error, so callers never overwrite it with a fresh identity.
     pub fn load() -> Result<Self> {
         let path = Self::path()?;
-        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+        };
         serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
     }
 
@@ -69,11 +77,15 @@ impl Config {
                 .with_context(|| format!("creating {}", parent.display()))?;
         }
         let bytes = serde_json::to_vec_pretty(self)?;
-        std::fs::write(&path, bytes).with_context(|| format!("writing {}", path.display()))
+        let tmp = path.with_extension("json.tmp");
+        std::fs::write(&tmp, bytes).with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::rename(&tmp, &path).with_context(|| format!("replacing {}", path.display()))
     }
 
     pub fn persist_with(f: impl FnOnce(&mut Config)) -> Result<()> {
-        let mut cfg = Self::load().unwrap_or_else(|_| Self::default());
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        let mut cfg = Self::load()?;
         f(&mut cfg);
         cfg.save()
     }

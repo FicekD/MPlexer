@@ -1,6 +1,5 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::{Level, Log, Metadata, Record};
 
@@ -67,9 +66,5 @@ pub fn init() -> LogBuffer {
 }
 
 fn clock() -> String {
-    let secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    format!("{:02}:{:02}:{:02}", (secs / 3600) % 24, (secs / 60) % 60, secs % 60)
+    jiff::Zoned::now().strftime("%H:%M:%S").to_string()
 }

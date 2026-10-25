@@ -102,7 +102,11 @@ impl MplexerApp {
         let mut standby = 0;
         let mut error = 0;
         for m in &self.state.monitors {
-            match CardStatus::derive(m.available, m.controllable, m.pending) {
+            match CardStatus::derive(
+                m.reachable(),
+                m.switchable_here() || m.switchable_by_peer(),
+                m.pending,
+            ) {
                 CardStatus::Active => active += 1,
                 CardStatus::NoControl | CardStatus::Pending => standby += 1,
                 CardStatus::Offline => error += 1,
@@ -144,7 +148,11 @@ fn monitor_card(
     net: &NetHandle,
     p: &Palette,
 ) {
-    let status = CardStatus::derive(m.available, m.controllable, m.pending);
+    let status = CardStatus::derive(
+        m.reachable(),
+        m.switchable_here() || m.switchable_by_peer(),
+        m.pending,
+    );
     Frame::default()
         .fill(p.card)
         .stroke(Stroke::new(1.0, p.border))
@@ -186,7 +194,7 @@ fn monitor_card(
                 let chosen = ui
                     .allocate_ui(Vec2::new(width, CONTROL_SLOT_H), |ui| {
                         ui.set_min_height(CONTROL_SLOT_H);
-                        if !m.controllable {
+                        if !m.switchable_here() && !m.switchable_by_peer() {
                             ui.label(RichText::new("NO CONTROL").color(p.blue).size(10.0))
                                 .on_hover_text(
                                     "This display doesn't answer DDC/CI, so its input can't be switched from software.",
@@ -198,14 +206,18 @@ fn monitor_card(
                     .inner;
 
                 if let Some(chosen) = chosen
-                    && Some(chosen) != m.current_input
+                    && Some(chosen) != m.shown_input()
                     && !m.pending
                 {
                     m.pending = true;
-                    // Attempt locally and ask any peer cabled to this monitor to do
-                    // the same; whichever host is active on it makes the switch stick.
-                    cmd_tx.send(WorkerCmd::SetInput { id: m.id.clone(), input: chosen }).ok();
-                    net.send(NetCmd::RequestSwitch { id: m.id.clone(), target: chosen });
+                    // Attempt locally and ask a peer cabled to this monitor to do the
+                    // same; whichever host the panel still listens to makes it stick.
+                    if m.switchable_here() {
+                        cmd_tx.send(WorkerCmd::SetInput { id: m.id.clone(), input: chosen }).ok();
+                    }
+                    if m.switchable_by_peer() {
+                        net.send(NetCmd::RequestSwitch { id: m.id.clone(), target: chosen });
+                    }
                 }
             });
         });
@@ -219,21 +231,22 @@ fn input_selector(
     config: &Config,
     p: &Palette,
 ) -> Option<InputSource> {
-    if m.observed_inputs.is_empty() {
+    let inputs = m.inputs();
+    if inputs.is_empty() {
         ui.label(RichText::new("DETECTING\u{2026}").color(p.muted).size(10.0)).on_hover_text(
             "No input seen yet. Switch this display once (its own button works) and it'll appear here.",
         );
         return None;
     }
 
-    let current = m.current_input;
+    let current = m.shown_input();
     let mut selected = current;
     ui.add_enabled_ui(!m.pending, |ui| {
         egui::ComboBox::from_id_salt(&m.id)
             .width(ui.available_width() - 8.0)
             .selected_text(RichText::new(selected_input_label(current, config)).size(11.0))
             .show_ui(ui, |ui| {
-                for &inp in &m.observed_inputs {
+                for &inp in &inputs {
                     ui.selectable_value(&mut selected, Some(inp), short_label(inp, config));
                 }
             });

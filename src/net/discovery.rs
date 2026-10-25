@@ -1,4 +1,4 @@
-use std::net::{IpAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, UdpSocket};
 use std::sync::mpsc::Sender;
 use std::thread;
 use std::time::Duration;
@@ -63,11 +63,43 @@ fn announce(socket: &UdpSocket, machine_id: Uuid, machine_name: &str, tcp_port: 
         }
     };
     loop {
-        if let Err(e) = socket.send_to(&payload, ("255.255.255.255", UDP_PORT)) {
-            log::debug!("announce broadcast failed: {e:#}");
+        for target in broadcast_targets() {
+            if let Err(e) = socket.send_to(&payload, (target, UDP_PORT)) {
+                log::debug!("announce broadcast to {target} failed: {e:#}");
+            }
         }
         thread::sleep(ANNOUNCE_INTERVAL);
     }
+}
+
+/// Windows sends 255.255.255.255 out of a single adapter, often a virtual one,
+/// so announce on every IPv4 subnet's own broadcast address instead. Interfaces
+/// are listed afresh each round so adapters that come up later are covered.
+fn broadcast_targets() -> Vec<Ipv4Addr> {
+    let mut targets: Vec<Ipv4Addr> = match if_addrs::get_if_addrs() {
+        Ok(ifaces) => ifaces
+            .into_iter()
+            .filter(|iface| iface.is_oper_up())
+            .filter_map(|iface| match iface.addr {
+                if_addrs::IfAddr::V4(v4) if !v4.ip.is_loopback() => {
+                    Some(v4.broadcast.unwrap_or_else(|| {
+                        Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask))
+                    }))
+                }
+                _ => None,
+            })
+            .collect(),
+        Err(e) => {
+            log::debug!("cannot list network interfaces: {e:#}");
+            Vec::new()
+        }
+    };
+    targets.sort();
+    targets.dedup();
+    if targets.is_empty() {
+        targets.push(Ipv4Addr::BROADCAST);
+    }
+    targets
 }
 
 fn listen(socket: &UdpSocket, my_id: Uuid, inbound: &Sender<NetInbound>) {

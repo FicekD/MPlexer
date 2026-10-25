@@ -68,7 +68,7 @@ impl MplexerApp {
                 });
 
                 if let Some((id, status)) = toggled {
-                    let cmd = if status == HostStatus::Connected {
+                    let cmd = if matches!(status, HostStatus::Connected | HostStatus::Connecting) {
                         NetCmd::SelectPeer(None)
                     } else {
                         NetCmd::SelectPeer(Some(id))

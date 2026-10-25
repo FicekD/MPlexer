@@ -53,6 +53,8 @@ pub enum NetEvt {
     },
     PeerOffline,
     Hosts(Vec<HostView>),
+    /// The linked peer's view of its monitors; empty once the link drops.
+    PeerMonitors(Vec<MonitorInfo>),
     ExecuteSwitch {
         id: StableId,
         target: InputSource,
@@ -118,7 +120,6 @@ struct Net {
     local: LocalView,
     local_snaps: Vec<MonitorSnapshot>,
     peer: Option<PeerConn>,
-    peer_monitors: Vec<MonitorInfo>,
     epoch_counter: u64,
     last_dial: Option<Instant>,
     hosts: HashMap<Uuid, HostRecord>,
@@ -156,7 +157,6 @@ fn run(
         local,
         local_snaps: Vec::new(),
         peer: None,
-        peer_monitors: Vec::new(),
         epoch_counter: 0,
         last_dial: None,
         hosts: HashMap::new(),
@@ -232,7 +232,9 @@ impl Net {
         }
         self.selected_peer = sel;
         if self.peer.as_ref().is_some_and(|p| Some(p.peer_id) != sel) {
-            self.disconnect();
+            // Tell the other side so it stops redialing a link we dropped on purpose.
+            self.send_to_peer(Message::Unlink);
+            self.disconnect("disconnected");
         }
         if let Some(id) = sel
             && !self.connected()
@@ -244,12 +246,13 @@ impl Net {
         self.emit_hosts();
     }
 
-    fn disconnect(&mut self) {
+    fn disconnect(&mut self, status: &str) {
         if self.peer.take().is_some() {
-            self.peer_monitors.clear();
             self.last_dial = None;
-            self.emit(NetEvt::Status("disconnected".into()));
+            self.emit(NetEvt::Status(status.into()));
             self.emit(NetEvt::PeerOffline);
+            self.emit(NetEvt::PeerMonitors(Vec::new()));
+            self.emit_hosts();
         }
     }
 
@@ -290,7 +293,17 @@ impl Net {
 
         self.epoch_counter += 1;
         let epoch = self.epoch_counter;
+        // An accepted stream comes from the dialer's ephemeral port, so keep the
+        // announced address, or failing that assume it listens on our port.
         let peer_addr = stream.peer_addr().ok();
+        let sock = if initiated_by_me {
+            peer_addr
+        } else {
+            self.hosts
+                .get(&peer_id)
+                .and_then(|h| h.sock)
+                .or_else(|| peer_addr.map(|a| SocketAddr::new(a.ip(), self.config.comms_port)))
+        };
         let out_tx = link::start_io(stream, epoch, self.inbound.clone());
         self.peer = Some(PeerConn {
             epoch,
@@ -298,12 +311,11 @@ impl Net {
             initiated_by_me,
             out_tx,
         });
-        self.peer_monitors = peer_monitors;
         self.hosts.insert(
             peer_id,
             HostRecord {
                 name: peer_name.clone(),
-                sock: peer_addr,
+                sock,
                 last_seen: Instant::now(),
             },
         );
@@ -311,6 +323,7 @@ impl Net {
         log::info!("connected to peer '{peer_name}' ({peer_id})");
         self.emit(NetEvt::Status(format!("connected to {peer_name}")));
         self.emit(NetEvt::PeerOnline { name: peer_name });
+        self.emit(NetEvt::PeerMonitors(peer_monitors));
         self.emit_hosts();
         let infos = self.build_my_infos();
         self.send_to_peer(Message::State { monitors: infos });
@@ -335,7 +348,7 @@ impl Net {
         }
         match msg {
             Message::Hello { monitors, .. } | Message::State { monitors } => {
-                self.peer_monitors = monitors;
+                self.emit(NetEvt::PeerMonitors(monitors));
             }
             Message::SwitchRequest { id, target } => {
                 // Execute only if we're cabled to this monitor and can control it.
@@ -343,6 +356,14 @@ impl Net {
                     log::info!("peer requested switch of {id} to 0x{:02X}", target.0);
                     self.emit(NetEvt::ExecuteSwitch { id, target });
                 }
+            }
+            Message::Unlink => {
+                let peer_id = self.peer.as_ref().map(|p| p.peer_id);
+                log::info!("peer unlinked from us");
+                if self.selected_peer == peer_id {
+                    self.selected_peer = None;
+                }
+                self.disconnect("unlinked by peer");
             }
             Message::Heartbeat => {}
         }
@@ -353,12 +374,7 @@ impl Net {
             return;
         }
         log::info!("peer link closed");
-        self.peer = None;
-        self.peer_monitors.clear();
-        self.last_dial = None;
-        self.emit(NetEvt::Status("peer disconnected".into()));
-        self.emit(NetEvt::PeerOffline);
-        self.emit_hosts();
+        self.disconnect("peer disconnected");
     }
 
     fn tick(&mut self) {
@@ -444,7 +460,7 @@ mod tests {
     use crate::worker::MonitorSnapshot;
 
     fn id(model: &str) -> StableId {
-        crate::ddc::identity::stable_id(Some("acme"), Some(model), None, Some("serial"), None, 0)
+        crate::ddc::identity::stable_id(Some("acme"), Some(model), None, Some("serial"), None)
     }
 
     fn snap(controllable: bool) -> MonitorSnapshot {
@@ -478,7 +494,6 @@ mod tests {
             local: Arc::new(Mutex::new(Vec::new())),
             local_snaps: Vec::new(),
             peer: None,
-            peer_monitors: Vec::new(),
             epoch_counter: 0,
             last_dial: None,
             hosts: HashMap::new(),

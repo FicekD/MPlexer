@@ -16,3 +16,6 @@ log = "0.4.33"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 uuid = { version = "1.23.4", features = ["v4", "serde"] }
+if-addrs = "0.15.0"
+mccs-caps = "0.1.3"
+jiff = "0.2"

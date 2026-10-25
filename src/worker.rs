@@ -11,6 +11,8 @@ const SETTLE_DELAY: Duration = Duration::from_secs(1);
 pub enum WorkerCmd {
     Refresh,
     SetInput { id: StableId, input: InputSource },
+    /// Input codes another machine has seen on monitors cabled here too.
+    LearnInputs(Vec<(StableId, Vec<InputSource>)>),
 }
 
 pub enum WorkerEvt {
@@ -77,7 +79,16 @@ fn run(
                     result = match m.write_input(input) {
                         Ok(()) => {
                             std::thread::sleep(SETTLE_DELAY);
-                            m.read_input().map_err(|e| e.to_string())
+                            // A panel that just switched away from this cable often
+                            // stops answering on it, so a failed read-back still
+                            // means the write was accepted.
+                            m.read_input().or_else(|e| {
+                                log::debug!(
+                                    "read-back after switch failed, assuming {}: {e:#}",
+                                    input.label()
+                                );
+                                Ok(input)
+                            })
                         }
                         Err(e) => Err(e.to_string()),
                     };
@@ -99,9 +110,32 @@ fn run(
                     return;
                 }
             }
+            Ok(WorkerCmd::LearnInputs(learned)) => {
+                let mut grew = false;
+                for (id, inputs) in learned {
+                    if !monitors.iter().any(|m| m.id == id) {
+                        continue;
+                    }
+                    for input in inputs {
+                        grew |= note_input(&mut observed, &id, input);
+                    }
+                }
+                if grew {
+                    persist(&observed);
+                    last = snapshot(&monitors, &observed);
+                    if emit(&evt_tx, &ctx, WorkerEvt::Monitors(last.clone())).is_err() {
+                        return;
+                    }
+                }
+            }
             Err(RecvTimeoutError::Timeout) => {
                 let mut grew = false;
+                // Displays that never answered and have no history (most TVs) only
+                // stall the queue with slow failing reads.
                 for m in monitors.iter_mut() {
+                    if !m.controllable && observed.get(&m.id).is_none_or(Vec::is_empty) {
+                        continue;
+                    }
                     if let Ok(input) = m.read_input() {
                         grew |= note_input(&mut observed, &m.id, input);
                     }
